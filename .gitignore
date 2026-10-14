@@ -1,0 +1,20 @@
+# Secrets and local configuration
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated and user data (projects, downloaded media, voices, renders, TTS packages)
+data/
+revision/
+
+# Windows shortcuts (they contain absolute paths; instalar.bat recreates them)
+*.lnk
+
+# Channel media (music and outro with their own rights); see Canal/LEEME.txt
+Canal/*
+!Canal/LEEME.txt

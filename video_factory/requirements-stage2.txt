@@ -1,0 +1,3 @@
+# Instalar en el mismo entorno virtual donde ya funciona la GUI
+-r requirements-gui.txt
+# Etapa 2 usa urllib de Python; no requiere requests ni python-dotenv.

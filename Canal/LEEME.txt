@@ -1,8 +1,8 @@
-Archivos de los canales (no se suben al repositorio por su tamaño y derechos de uso).
-Copia aquí, junto a esta nota:
+Archivos de los canales (incluidos en el repositorio):
 
   fondo_1.mp3               Música de fondo del canal "Qué curioso…¿no?"
   outro_sincronizado.mp4    Outro del canal "Qué curioso…¿no?"
   belleza_fondo.mp3         Música de fondo del canal "Belleza con evidencia"
 
 Si falta alguno, el montaje funciona igual y lo avisa en el registro.
+Confirma los derechos de uso de la música antes de publicar.

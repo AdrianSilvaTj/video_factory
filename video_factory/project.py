@@ -51,7 +51,7 @@ _ASS_HEADER = (
 
 
 def new_scene(dialogue: str = "") -> dict:
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom"}
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
 
 
 def create_project(name: str, channel: str = "que-curioso", root: Path | None = None) -> Path:
@@ -236,7 +236,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         chunks = _caption_chunks(dialogue, wrap_width * 2)
         total_words = max(1, sum(len(c.split()) for c in chunks))
         offset = cursor
-        for chunk in chunks:
+        for chunk in chunks if scene.get("show_subtitles", True) else []:
             span = spoken * len(chunk.split()) / total_words
             text = "\\N".join(textwrap.wrap(chunk.replace("{", "(").replace("}", ")"), width=wrap_width, break_long_words=False))
             ass_lines.append(f"Dialogue: 0,{_stamp(offset)},{_stamp(offset + span)},{SUBTITLE_POSITIONS.get(scene.get('subtitle_pos'), SUBTITLE_POSITIONS['bottom'])[0]},,0,0,0,,{text}\n")

@@ -6,7 +6,7 @@ Aplicación de escritorio (Windows, PySide6) para producir videos verticales 9:1
 1. Instala Python 3.11 o superior (marca "Add python.exe to PATH").
 2. Ejecuta `instalar.bat`: crea el entorno virtual, instala PySide6 y `edge-tts`, instala FFmpeg con winget si falta y crea el acceso directo en el Escritorio.
 3. Copia `video_factory/.env.example` a `video_factory/.env` y escribe tus claves de Pexels y Pixabay y, si la tienes, el ID de cuenta y la clave de Vecteezy (todas opcionales; NASA, Wikimedia Commons y Openverse no necesitan clave). **Nunca subas `.env` al repositorio.**
-4. Copia a `Canal/` la música y el outro de tus canales (ver `Canal/LEEME.txt`).
+4. La música y el outro de los canales vienen en `Canal/` (ver `Canal/LEEME.txt`).
 
 ## Uso
 `python -m video_factory.gui` o el acceso directo "Video Factory".

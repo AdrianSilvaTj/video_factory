@@ -297,6 +297,9 @@ class StudioWindow(QMainWindow):
         self.start.valueChanged.connect(self._scene_options_changed)
         self.start_label = QLabel("Inicio del video:")
         form.addRow(self.start_label, self.start)
+        self.sub_show = QCheckBox("Mostrar subtítulos en esta escena")
+        self.sub_show.toggled.connect(self._scene_options_changed)
+        form.addRow(self.sub_show)
         self.sub_pos = QComboBox()
         for label, key in (("Abajo", "bottom"), ("Centro", "middle"), ("Arriba", "top")):
             self.sub_pos.addItem(label, key)
@@ -528,6 +531,8 @@ class StudioWindow(QMainWindow):
         self.zoom_direction.setCurrentIndex(self.zoom_direction.findData(scene["zoom"]["direction"]))
         self.start.setValue(float(scene.get("start") or 0))
         self.sub_pos.setCurrentIndex(self.sub_pos.findData(scene.get("subtitle_pos", "bottom")))
+        self.sub_show.setChecked(scene.get("show_subtitles", True))
+        self.sub_pos.setEnabled(self.sub_show.isChecked())
         media = scene.get("media")
         is_image = bool(media) and media["type"] == "image"
         for widget in (self.zoom_label, self.zoom_speed, self.zoom_direction):
@@ -552,6 +557,8 @@ class StudioWindow(QMainWindow):
         scene["zoom"] = {"speed": self.zoom_speed.currentData(), "direction": self.zoom_direction.currentData()}
         scene["start"] = self.start.value()
         scene["subtitle_pos"] = self.sub_pos.currentData()
+        scene["show_subtitles"] = self.sub_show.isChecked()
+        self.sub_pos.setEnabled(self.sub_show.isChecked())
         self._changed()
 
     def _update_total(self):

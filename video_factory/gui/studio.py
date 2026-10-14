@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import time
@@ -653,9 +654,24 @@ class StudioWindow(QMainWindow):
         self._say(f"Listo: {report['duration_seconds']} s. " + " ".join(report["warnings"]) + f"\n{report['output']}")
 
 
+def _install_error_hook():
+    """The desktop shortcut has no console: show unexpected errors in a dialog and keep them in data/logs/error.log."""
+    log_file = PROJECTS_DIR.parent / "logs" / "error.log"
+
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{text}\n")
+        QMessageBox.critical(None, "Error inesperado", f"{exc_type.__name__}: {exc}\n\nEl detalle completo quedó en:\n{log_file}")
+
+    sys.excepthook = hook
+
+
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    _install_error_hook()
     window = StudioWindow()
     window.show()
     return app.exec()

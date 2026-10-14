@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -296,6 +297,11 @@ class StudioWindow(QMainWindow):
         self.start.valueChanged.connect(self._scene_options_changed)
         self.start_label = QLabel("Inicio del video:")
         form.addRow(self.start_label, self.start)
+        self.sub_pos = QComboBox()
+        for label, key in (("Abajo", "bottom"), ("Centro", "middle"), ("Arriba", "top")):
+            self.sub_pos.addItem(label, key)
+        self.sub_pos.activated.connect(self._scene_options_changed)
+        form.addRow("Posición de subtítulos:", self.sub_pos)
         layout.addLayout(form)
 
         self.total = QLabel()
@@ -307,9 +313,17 @@ class StudioWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
-        self.open_btn = QPushButton("Abrir video renderizado")
+        self.open_btn = QWidget()
+        open_row = QHBoxLayout(self.open_btn)
+        open_row.setContentsMargins(0, 0, 0, 0)
+        play = QPushButton("Abrir video renderizado")
+        play.clicked.connect(lambda: os.startfile(self.folder / "render" / "video.mp4"))
+        open_row.addWidget(play)
+        show = QPushButton("Abrir carpeta del video")
+        show.setToolTip("Abre el Explorador de archivos con el video seleccionado")
+        show.clicked.connect(lambda: subprocess.Popen(["explorer", "/select,", str((self.folder / "render" / "video.mp4").resolve())]))
+        open_row.addWidget(show)
         self.open_btn.setVisible(False)
-        self.open_btn.clicked.connect(lambda: os.startfile(self.folder / "render" / "video.mp4"))
         layout.addWidget(self.open_btn)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -513,6 +527,7 @@ class StudioWindow(QMainWindow):
         self.zoom_speed.setCurrentIndex(self.zoom_speed.findData(scene["zoom"]["speed"]))
         self.zoom_direction.setCurrentIndex(self.zoom_direction.findData(scene["zoom"]["direction"]))
         self.start.setValue(float(scene.get("start") or 0))
+        self.sub_pos.setCurrentIndex(self.sub_pos.findData(scene.get("subtitle_pos", "bottom")))
         media = scene.get("media")
         is_image = bool(media) and media["type"] == "image"
         for widget in (self.zoom_label, self.zoom_speed, self.zoom_direction):
@@ -536,6 +551,7 @@ class StudioWindow(QMainWindow):
         scene["crop"] = self.crop.currentData()
         scene["zoom"] = {"speed": self.zoom_speed.currentData(), "direction": self.zoom_direction.currentData()}
         scene["start"] = self.start.value()
+        scene["subtitle_pos"] = self.sub_pos.currentData()
         self._changed()
 
     def _update_total(self):

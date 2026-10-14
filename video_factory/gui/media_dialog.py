@@ -98,7 +98,7 @@ class MediaDialog(QDialog):
         self.kind.addItem("Videos e imágenes", "both")
         row.addWidget(self.kind)
         self.vertical = QCheckBox("Solo verticales")
-        self.vertical.setChecked(True)
+        self.vertical.setChecked(False)
         row.addWidget(self.vertical)
         self.search_btn = QPushButton("Buscar")
         self.search_btn.clicked.connect(self.search)

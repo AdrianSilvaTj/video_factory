@@ -31,13 +31,16 @@ ZOOM_SPEEDS = {"none": 0.0, "slow": 0.08, "medium": 0.16, "fast": 0.28}
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"}
 
 
-def subtitle_style_line(sub: dict) -> str:
-    """Build the ASS 'Style:' line from the project's subtitle settings."""
+SUBTITLE_POSITIONS = {"bottom": ("Default", 2), "middle": ("Middle", 5), "top": ("Top", 8)}
+
+
+def subtitle_style_line(sub: dict, name: str = "Default", alignment: int = 2, margin_v: int | None = None) -> str:
+    """Build an ASS 'Style:' line from the project's subtitle settings."""
     def bgr(color: str) -> str:
         c = color.lstrip("#")
         return f"&H00{c[4:6]}{c[2:4]}{c[0:2]}".upper()
     size = int(sub["size"])
-    return f"Style: Default,{sub['font']},{size},{bgr(sub['color'])},&H0000FFFF,{bgr(sub['outline'])},&HAA061018,{1 if sub.get('bold', True) else 0},0,0,0,100,100,0,0,1,{max(4, round(size / 12))},1,2,90,90,{int(sub.get('margin_v', 420))},1"
+    return f"Style: {name},{sub['font']},{size},{bgr(sub['color'])},&H0000FFFF,{bgr(sub['outline'])},&HAA061018,{1 if sub.get('bold', True) else 0},0,0,0,100,100,0,0,1,{max(4, round(size / 12))},1,{alignment},90,90,{int(sub.get('margin_v', 420) if margin_v is None else margin_v)},1"
 
 
 _ASS_HEADER = (
@@ -48,7 +51,7 @@ _ASS_HEADER = (
 
 
 def new_scene(dialogue: str = "") -> dict:
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS}
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom"}
 
 
 def create_project(name: str, channel: str = "que-curioso", root: Path | None = None) -> Path:
@@ -176,7 +179,8 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     out_dir = folder / "render" / "preview" if preview else folder / "render"
     (out_dir / "scenes").mkdir(parents=True, exist_ok=True)
     (folder / "voice").mkdir(exist_ok=True)
-    style_line = subtitle_style_line(project["subtitles"])
+    sub = project["subtitles"]
+    style_line = "\n".join([subtitle_style_line(sub), subtitle_style_line(sub, "Middle", 5, 0), subtitle_style_line(sub, "Top", 8, 260)])
     wrap_width = max(8, int(900 / (int(project["subtitles"]["size"]) * 0.52)))
     k = 1 if preview else 2
     ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(style=style_line)], [], [], [], 0.0
@@ -235,7 +239,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         for chunk in chunks:
             span = spoken * len(chunk.split()) / total_words
             text = "\\N".join(textwrap.wrap(chunk.replace("{", "(").replace("}", ")"), width=wrap_width, break_long_words=False))
-            ass_lines.append(f"Dialogue: 0,{_stamp(offset)},{_stamp(offset + span)},Default,,0,0,0,,{text}\n")
+            ass_lines.append(f"Dialogue: 0,{_stamp(offset)},{_stamp(offset + span)},{SUBTITLE_POSITIONS.get(scene.get('subtitle_pos'), SUBTITLE_POSITIONS['bottom'])[0]},,0,0,0,,{text}\n")
             offset += span
         cursor += length
         records.append({"scene": number, "seconds": round(length, 2), "media": scene["media"]["path"], "crop": scene["crop"], "zoom": scene["zoom"] if is_image else None})

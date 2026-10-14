@@ -5,11 +5,12 @@ Cada resultado conserva autor, enlace y licencia para los créditos del video.
 """
 from __future__ import annotations
 
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, urlencode
 
-from .clips import _rank, _request_json, search_pexels, search_pexels_images, search_pixabay, search_pixabay_images
+from .clips import _rank, _request_json, load_env_file, search_pexels, search_pexels_images, search_pixabay, search_pixabay_images
 
 SOURCES = {
     "Pexels": ("video", "image"),
@@ -17,6 +18,7 @@ SOURCES = {
     "NASA": ("video", "image"),
     "Wikimedia Commons": ("video", "image"),
     "Openverse": ("image",),
+    "Vecteezy": ("video", "image"),
 }
 _NASA_LICENSE = "Dominio público (NASA); verifica créditos si aparecen personas, logos o material de terceros"
 _COMMONS_FILE = re.compile(r"(https://upload\.wikimedia\.org/wikipedia/commons)/(\w/\w\w)/(.+)")
@@ -75,6 +77,58 @@ def search_wikimedia(query: str, kind: str, vertical_only: bool = False) -> list
     return results
 
 
+def _vecteezy_access() -> tuple[str, dict]:
+    load_env_file()
+    key, account = os.getenv("VECTEEZY_API_KEY", "").strip(), os.getenv("VECTEEZY_ACCOUNT_ID", "").strip()
+    if not key or not account:
+        raise RuntimeError("Faltan VECTEEZY_API_KEY y VECTEEZY_ACCOUNT_ID en el archivo .env.")
+    return account, {"Authorization": f"Bearer {key}"}
+
+
+def search_vecteezy(query: str, kind: str, vertical_only: bool = False) -> list[dict]:
+    """Search Vecteezy. Searching uses the general quota; the download quota is only spent when a result is chosen."""
+    account, headers = _vecteezy_access()
+    content = "video" if kind == "video" else "photo"
+    params = {"term": query, "content_type": content, "per_page": 40, "family_friendly": "true"}
+    if kind == "image" and vertical_only:
+        params["orientation"] = "vertical"
+    data = _request_json(f"https://api.vecteezy.com/v2/{account}/resources?" + urlencode(params), headers)
+    results = []
+    limit = 250 * 1024 * 1024 if kind == "video" else 60 * 1024 * 1024
+    for res in data.get("resources", []):
+        metadata = res.get("file_metadata") or {}
+        sizes = metadata.get("available_download_sizes") or []
+        original = next((x for x in sizes if x.get("id") == "original"), sizes[0] if sizes else {})
+        files = {t.get("extension", ""): int(t.get("size_in_bytes") or 0) for t in metadata.get("available_file_types", [])}
+        wanted = "mp4" if kind == "video" else "jpg"
+        file_type = wanted if wanted in files else (min(files, key=files.get) if files else "")
+        if files and files[file_type] > limit:
+            continue
+        preview = res.get("preview_url") or ""
+        results.append(_item("Vecteezy", kind, str(res["id"]), query=query, title=res.get("title") or "Vecteezy", width=int(original.get("width") or 0), height=int(original.get("height") or 0),
+                             download_url="", file_type=file_type, page_url=f"https://www.vecteezy.com/{content}/{res['id']}",
+                             author="Vecteezy", license="Vecteezy (la atribución se confirma al descargar)", license_url="https://www.vecteezy.com/licensing-agreement",
+                             attribution="Vecteezy", preview_url=res.get("thumbnail_2x_url") or res.get("thumbnail_url") or preview,
+                             preview_video_url=preview if preview.split("?")[0].endswith((".mp4", ".webm")) else ""))
+    return results
+
+
+def resolve_vecteezy_download(item: dict) -> str:
+    """Ask Vecteezy for the signed download URL (spends one download) and record the license terms on the item."""
+    account, headers = _vecteezy_access()
+    params = {"file_type": item["file_type"]} if item.get("file_type") else {}
+    data = _request_json(f"https://api.vecteezy.com/v2/{account}/resources/{item['provider_id']}/download?" + urlencode(params), headers)
+    if data.get("requires_attribution"):
+        item["license"] = "Vecteezy: requiere atribución"
+        item["attribution"] = f"{item.get('title', '')[:90]} / Vecteezy"
+        link = (data.get("required_attribution_url") or "").replace("://api.vecteezy.com/", "://www.vecteezy.com/")
+        item["license_url"] = link or item["license_url"]
+        item["page_url"] = link or item["page_url"]
+    else:
+        item["license"] = "Vecteezy: sin atribución obligatoria"
+    return data["url"]
+
+
 def search_openverse(query: str, kind: str, vertical_only: bool = False) -> list[dict]:
     params = {"q": query, "page_size": 20}
     if vertical_only:
@@ -102,6 +156,8 @@ _SEARCHERS = {
     ("Wikimedia Commons", "video"): lambda q, v: search_wikimedia(q, "video"),
     ("Wikimedia Commons", "image"): lambda q, v: search_wikimedia(q, "image"),
     ("Openverse", "image"): lambda q, v: search_openverse(q, "image", v),
+    ("Vecteezy", "video"): lambda q, v: search_vecteezy(q, "video", v),
+    ("Vecteezy", "image"): lambda q, v: search_vecteezy(q, "image", v),
 }
 
 

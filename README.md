@@ -5,7 +5,7 @@ Aplicación de escritorio (Windows, PySide6) para producir videos verticales 9:1
 ## Instalación
 1. Instala Python 3.11 o superior (marca "Add python.exe to PATH").
 2. Ejecuta `instalar.bat`: crea el entorno virtual, instala PySide6 y `edge-tts`, instala FFmpeg con winget si falta y crea el acceso directo en el Escritorio.
-3. Copia `video_factory/.env.example` a `video_factory/.env` y escribe tus claves de Pexels y Pixabay (opcionales; NASA, Wikimedia Commons y Openverse no necesitan clave). **Nunca subas `.env` al repositorio.**
+3. Copia `video_factory/.env.example` a `video_factory/.env` y escribe tus claves de Pexels y Pixabay y, si la tienes, el ID de cuenta y la clave de Vecteezy (todas opcionales; NASA, Wikimedia Commons y Openverse no necesitan clave). **Nunca subas `.env` al repositorio.**
 4. Copia a `Canal/` la música y el outro de tus canales (ver `Canal/LEEME.txt`).
 
 ## Uso
@@ -18,7 +18,7 @@ Aplicación de escritorio (Windows, PySide6) para producir videos verticales 9:1
 
 ## Estructura
 - `video_factory/project.py`: modelo de proyecto, render por escenas y créditos.
-- `video_factory/stock_sources.py` y `clips.py`: búsqueda y descarga en Pexels, Pixabay, NASA, Wikimedia Commons y Openverse.
+- `video_factory/stock_sources.py` y `clips.py`: búsqueda y descarga en Pexels, Pixabay, NASA, Wikimedia Commons, Openverse y Vecteezy.
 - `video_factory/channels.py`: canales (música, outro, subtítulos) y voces.
 - `video_factory/gui/`: ventana única (`studio.py`), selector de recursos (`media_dialog.py`) y tareas en segundo plano (`workers.py`).
 - `video_factory/pipeline.py`, `catalog.py`, `storage.py` y demás: módulos originales del proyecto, conservados.

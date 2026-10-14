@@ -207,6 +207,9 @@ def _download_file(url: str, path: Path) -> None:
 def download_media(item: dict, destination: Path) -> Path:
     """Download one chosen search result into destination (trying fallback URLs) and return the local path."""
     destination.mkdir(parents=True, exist_ok=True)
+    if item.get("provider") == "Vecteezy" and not item.get("download_url"):
+        from .stock_sources import resolve_vecteezy_download
+        item["download_url"] = resolve_vecteezy_download(item)
     default = ".jpg" if item.get("media_type") == "image" else ".mp4"
     last_error = None
     for url in [item.get("download_url", ""), *item.get("fallback_urls", [])]:

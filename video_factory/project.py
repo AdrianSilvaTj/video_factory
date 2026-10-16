@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import json
 import shutil
 import subprocess
@@ -78,23 +79,108 @@ def new_scene(dialogue: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
 
 
-def create_project(name: str, channel: str = "que-curioso", root: Path | None = None) -> Path:
+def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
+    channel = channel or last_channel()
     if channel not in CHANNELS:
         raise ValueError(f"Canal desconocido: {channel}")
     folder = (root or PROJECTS_DIR) / f"{slug(name)}-{uuid.uuid4().hex[:4]}"
     (folder / "assets").mkdir(parents=True)
-    save_json(folder / "project.json", {
+    project = {
         "schema_version": 1, "name": name, "channel": channel, "voice": CHANNELS[channel]["default_voice"], "voice_settings": voice_defaults(CHANNELS[channel]["default_voice"]),
-        "music": {"enabled": True, "gain": CHANNELS[channel]["music_gain"], "path": None}, "outro": CHANNELS[channel]["outro"] is not None,
+        "music": {"enabled": True, "gain": CHANNELS[channel]["music_gain"], "path": None}, "outro": CHANNELS[channel]["outro"] is not None, "outro_file": None, "outro_name": None,
         "subtitles": dict(CHANNELS[channel]["subtitles"]), "scenes": [new_scene()], "created_at": now_iso(),
-    })
+    }
+    apply_channel_defaults(folder, project)
+    save_json(folder / "project.json", project)
     return folder
+
+
+DEFAULTS_FILE = PROJECTS_DIR.parent / "channel_defaults.json"
+
+
+def _read_defaults() -> dict:
+    try:
+        return json.loads(DEFAULTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"last_channel": None, "channels": {}}
+
+
+def last_channel() -> str:
+    """Channel of the last settings change; new projects start with it."""
+    key = _read_defaults().get("last_channel")
+    return key if key in CHANNELS else "que-curioso"
+
+
+SHARED_PREFIX = "shared:"
+OUTRO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
+
+
+def import_shared(channel: str, source: Path) -> str:
+    """Store a music or outro file once per channel (data/channel_defaults/<canal>/) and return a reference every project can share."""
+    target_dir = DEFAULTS_FILE.parent / "channel_defaults" / channel
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{slug(source.stem)}{source.suffix.casefold()}"
+    if target.exists() and target.stat().st_size != source.stat().st_size:
+        target = target_dir / f"{slug(source.stem)}-{uuid.uuid4().hex[:4]}{source.suffix.casefold()}"
+    if not target.exists():
+        shutil.copy2(source, target)
+    return SHARED_PREFIX + target.relative_to(DEFAULTS_FILE.parent).as_posix()
+
+
+def resolve_asset(folder: Path, reference: str) -> Path:
+    """Path of a project file, or of a file shared between projects ('shared:...' references)."""
+    if reference.startswith(SHARED_PREFIX):
+        return DEFAULTS_FILE.parent / reference[len(SHARED_PREFIX):]
+    return folder / reference
+
+
+def _shared_reference(folder: Path, channel: str, reference: str | None) -> str | None:
+    """Turn a project-owned file (older projects) into a shared one; shared references are kept as they are."""
+    if not reference or reference.startswith(SHARED_PREFIX):
+        return reference
+    owned = folder / reference
+    return import_shared(channel, owned) if owned.is_file() else None
+
+
+def remember_channel_defaults(folder: Path, project: dict) -> None:
+    """Keep the project's voice, subtitles, music and outro as the starting point of the next project of this channel."""
+    data = _read_defaults()
+    data.setdefault("channels", {})
+    music = project["music"]
+    data["channels"][project["channel"]] = {
+        "voice": project["voice"], "voice_settings": dict(project["voice_settings"]), "outro": project["outro"], "subtitles": dict(project["subtitles"]),
+        "outro_file": _shared_reference(folder, project["channel"], project.get("outro_file")), "outro_name": project.get("outro_name"),
+        "music": {"enabled": music["enabled"], "gain": music["gain"], "name": music.get("name"), "file": _shared_reference(folder, project["channel"], music["path"])},
+    }
+    data["last_channel"] = project["channel"]
+    save_json(DEFAULTS_FILE, data)
+
+
+def apply_channel_defaults(folder: Path, project: dict) -> bool:
+    """Replace the project's channel settings with the saved ones; returns False if nothing was saved for this channel."""
+    entry = _read_defaults().get("channels", {}).get(project["channel"])
+    if not entry or entry.get("voice") not in VOICES:
+        return False
+    project["voice"] = entry["voice"]
+    project["voice_settings"] = {**voice_defaults(entry["voice"]), **entry.get("voice_settings", {})}
+    project["outro"] = bool(entry.get("outro"))
+    project["subtitles"] = {**CHANNELS[project["channel"]]["subtitles"], **entry.get("subtitles", {})}
+    saved = entry.get("music", {})
+    project["music"].update({"enabled": bool(saved.get("enabled", True)), "gain": saved.get("gain", project["music"]["gain"]), "path": None, "name": None})
+    if saved.get("file") and resolve_asset(folder, saved["file"]).is_file():
+        project["music"].update({"path": saved["file"], "name": saved.get("name")})
+    project["outro_file"], project["outro_name"] = None, None
+    if entry.get("outro_file") and resolve_asset(folder, entry["outro_file"]).is_file():
+        project["outro_file"], project["outro_name"] = entry["outro_file"], entry.get("outro_name")
+    return True
 
 
 def load_project(folder: Path) -> dict:
     project = load_json(folder / "project.json")
     project.pop("subtitle_style", None)
     project.setdefault("voice_settings", voice_defaults(project["voice"]))
+    project.setdefault("outro_file", None)
+    project.setdefault("outro_name", None)
     project.setdefault("subtitles", dict(CHANNELS[project["channel"]]["subtitles"]))
     project["music"].setdefault("path", None)
     return project
@@ -197,6 +283,14 @@ def _stamp(seconds: float) -> str:
     return f"{whole // 3600}:{(whole // 60) % 60:02d}:{whole % 60:02d}.{int((seconds - whole) * 100):02d}"
 
 
+def _media_info(ffmpeg: str, media: Path) -> tuple[bool, float]:
+    """Whether a media file has an audio track, and its duration in seconds."""
+    text = run([ffmpeg, "-hide_banner", "-i", str(media)], capture_output=True, text=True, timeout=60).stderr
+    match = re.search(r"Duration: (\d+):(\d+):([\d.]+)", text)
+    seconds = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3)) if match else 2.0
+    return "Audio:" in text, seconds
+
+
 def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=None, only_scene: int | None = None) -> dict:
     """Render the project into render/video.mp4, or a quick low-resolution preview of one scene."""
     project = load_project(folder)
@@ -285,8 +379,8 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     ass.write_text("".join(ass_lines), encoding="utf-8-sig")
     ass_filter = str(ass.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
     total = cursor
-    music = folder / project["music"]["path"] if project["music"]["path"] else channel["music"]
-    outro = channel["outro"]
+    music = resolve_asset(folder, project["music"]["path"]) if project["music"]["path"] else channel["music"]
+    outro = resolve_asset(folder, project["outro_file"]) if project["outro_file"] else channel["outro"]
     use_music = bool(project["music"]["enabled"] and music and music.is_file())
     use_outro = bool(not preview and project["outro"] and outro and outro.is_file())
     cmd = [ffmpeg, "-y"]
@@ -303,7 +397,9 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         graph.append("[voice]anull[main_audio]")
     if use_outro:
         cmd += ["-i", str(outro)]
-        graph += [f"[{next_input}:v:0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1[outro_v]", f"[{next_input}:a:0]{_AUDIO_FMT}[outro_a]", "[main_video][outro_v]concat=n=2:v=1:a=0[final_video]", "[main_audio][outro_a]concat=n=2:v=0:a=1[final_audio]"]
+        has_audio, outro_seconds = _media_info(ffmpeg, outro)
+        outro_audio = f"[{next_input}:a:0]{_AUDIO_FMT}[outro_a]" if has_audio else f"anullsrc=r=48000:cl=stereo:d={outro_seconds:.3f},{_AUDIO_FMT}[outro_a]"
+        graph += [f"[{next_input}:v:0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1[outro_v]", outro_audio, "[main_video][outro_v]concat=n=2:v=1:a=0[final_video]", "[main_audio][outro_a]concat=n=2:v=0:a=1[final_audio]"]
         maps = ["-map", "[final_video]", "-map", "[final_audio]"]
     else:
         maps = ["-map", "[main_video]", "-map", "[main_audio]"]

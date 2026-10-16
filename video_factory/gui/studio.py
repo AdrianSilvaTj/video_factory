@@ -25,7 +25,8 @@ from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
     CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
-    load_project, new_scene, render_project, save_project, split_script, synthesize_voice, voice_defaults,
+    OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project,
+    split_script, synthesize_voice, voice_defaults,
 )
 from ..storage import APP_ROOT
 from .frame_preview import compose_preview
@@ -127,6 +128,7 @@ class StudioWindow(QMainWindow):
 
         splitter = QSplitter()
         self.busy = False
+        self.settings_dirty = False
         self.general_panel = self._build_general()
         self.scenes_panel = self._build_scenes()
         splitter.addWidget(self.general_panel)
@@ -187,9 +189,20 @@ class StudioWindow(QMainWindow):
         self.music_audio = QAudioOutput()
         self.music_player.setAudioOutput(self.music_audio)
         self.music_player.playbackStateChanged.connect(lambda state: self.music_btn.setText("⏹ Detener música" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Escuchar música"))
-        self.outro = QCheckBox("Incluir outro del canal")
+        self.outro = QCheckBox("Incluir outro")
         self.outro.toggled.connect(self._options_changed)
         form.addRow(self.outro)
+        self.outro_label = QLabel("Outro del canal")
+        self.outro_label.setWordWrap(True)
+        form.addRow("Archivo outro:", self.outro_label)
+        outro_buttons = QHBoxLayout()
+        pick_outro = QPushButton("Elegir outro…")
+        pick_outro.clicked.connect(self.pick_outro)
+        outro_buttons.addWidget(pick_outro)
+        reset_outro = QPushButton("Usar el del canal")
+        reset_outro.clicked.connect(self.reset_outro)
+        outro_buttons.addWidget(reset_outro)
+        form.addRow(outro_buttons)
         layout.addWidget(options)
 
         tune = QGroupBox("Ajustes de la voz")
@@ -432,7 +445,14 @@ class StudioWindow(QMainWindow):
                 name = "Mi video"
             else:
                 return
-        self.open_project(create_project(name.strip(), root=self.projects_dir))
+        channel = last_channel()
+        if not first:
+            keys = list(CHANNELS)
+            label, ok = QInputDialog.getItem(self, "Nuevo proyecto", "Canal (se usarán sus últimos ajustes):", [CHANNELS[k]["label"] for k in keys], keys.index(channel), False)
+            if not ok:
+                return
+            channel = keys[[CHANNELS[k]["label"] for k in keys].index(label)]
+        self.open_project(create_project(name.strip(), channel, root=self.projects_dir))
 
     def _project_chosen(self, index: int):
         self._save_now()
@@ -455,6 +475,7 @@ class StudioWindow(QMainWindow):
         self.outro.setChecked(self.project["outro"])
         self._load_subtitles()
         self._load_music_label()
+        self._load_outro_label()
         self._load_voice_settings()
         self.title.setText(self.project["name"])
         self.setWindowTitle(f"Video Factory — {self.project['name']}")
@@ -462,6 +483,11 @@ class StudioWindow(QMainWindow):
         self.open_btn.setVisible((folder / "render" / "video.mp4").is_file())
         self.loading = False
         self._rebuild_scenes()
+
+    def _settings_changed(self):
+        """A voice, subtitle, music or outro setting changed: remember it as the channel's starting point."""
+        self.settings_dirty = True
+        self._changed()
 
     def _changed(self):
         if not self.loading:
@@ -472,6 +498,9 @@ class StudioWindow(QMainWindow):
         self.save_timer.stop()
         if self.folder is not None and self.project:
             save_project(self.folder, self.project)
+            if self.settings_dirty:
+                remember_channel_defaults(self.folder, self.project)
+                self.settings_dirty = False
 
     def closeEvent(self, event):
         if self.busy:
@@ -515,21 +544,27 @@ class StudioWindow(QMainWindow):
         self.project.update({"voice": self.voice.currentData(), "outro": self.outro.isChecked()})
         self.project["music"].update({"enabled": self.music.isChecked(), "gain": self.gain.value() / 100})
         self.music_audio.setVolume(self.project["music"]["gain"])
-        self._changed()
+        self._settings_changed()
 
     def _channel_changed(self, *_):
-        channel = CHANNELS[self.channel.currentData()]
+        """Switch channel: use the settings last saved for it, or the channel's presets the first time."""
         self._stop_music()
-        self.project["channel"] = self.channel.currentData()
+        key = self.channel.currentData()
+        self.project["channel"] = key
+        if not apply_channel_defaults(self.folder, self.project):
+            channel = CHANNELS[key]
+            self.project.update({"voice": channel["default_voice"], "voice_settings": voice_defaults(channel["default_voice"]), "outro": channel["outro"] is not None, "subtitles": dict(channel["subtitles"])})
+            self.project["music"].update({"gain": channel["music_gain"], "path": None, "name": None})
+            self.project["outro_file"], self.project["outro_name"] = None, None
         self.loading = True
-        self.voice.setCurrentIndex(self.voice.findData(channel["default_voice"]))
-        self.gain.setValue(round(channel["music_gain"] * 100))
-        self.outro.setChecked(channel["outro"] is not None)
-        self.project["subtitles"] = dict(channel["subtitles"])
-        self.project["voice"] = self.voice.currentData()
-        self.project["voice_settings"] = voice_defaults(self.voice.currentData())
+        self.voice.setCurrentIndex(self.voice.findData(self.project["voice"]))
+        self.music.setChecked(self.project["music"]["enabled"])
+        self.gain.setValue(round(self.project["music"]["gain"] * 100))
+        self.outro.setChecked(self.project["outro"])
         self.loading = False
         self._load_subtitles()
+        self._load_music_label()
+        self._load_outro_label()
         self._load_voice_settings()
         self._options_changed()
 
@@ -559,12 +594,12 @@ class StudioWindow(QMainWindow):
         self.project["voice"] = self.voice.currentData()
         self.project["voice_settings"] = voice_defaults(self.voice.currentData())
         self._load_voice_settings()
-        self._changed()
+        self._settings_changed()
 
     def _voice_settings_changed(self, *_):
         if not self.loading:
             self.project["voice_settings"] = {"rate": self.voice_rate.value(), "pitch": self.voice_pitch.value(), "volume": self.voice_volume.value()}
-            self._changed()
+            self._settings_changed()
 
     def test_voice(self):
         self._save_now()
@@ -590,7 +625,7 @@ class StudioWindow(QMainWindow):
             self.music_player.stop()
             return
         music = self.project["music"]
-        path = self.folder / music["path"] if music["path"] else CHANNELS[self.project["channel"]]["music"]
+        path = resolve_asset(self.folder, music["path"]) if music["path"] else CHANNELS[self.project["channel"]]["music"]
         if not path.is_file():
             self._say(f"No encuentro el archivo de música: {path}")
             return
@@ -610,18 +645,41 @@ class StudioWindow(QMainWindow):
             QMessageBox.warning(self, "Formato no admitido", "Usa MP3, WAV, M4A, OGG, AAC o FLAC.")
             return
         self._stop_music()
-        self.project["music"].update({"path": import_media(self.folder, Path(file)), "enabled": True, "name": Path(file).name})
+        self.project["music"].update({"path": import_shared(self.project["channel"], Path(file)), "enabled": True, "name": Path(file).name})
         self.loading = True
         self.music.setChecked(True)
         self.loading = False
         self._load_music_label()
-        self._changed()
+        self._settings_changed()
 
     def reset_music(self):
         self._stop_music()
         self.project["music"].update({"path": None, "name": None})
         self._load_music_label()
-        self._changed()
+        self._settings_changed()
+
+    def pick_outro(self):
+        extensions = " ".join("*" + e for e in sorted(OUTRO_EXTENSIONS))
+        file, _ = QFileDialog.getOpenFileName(self, "Elegir outro (video)", "", f"Video ({extensions})")
+        if not file:
+            return
+        if Path(file).suffix.casefold() not in OUTRO_EXTENSIONS:
+            QMessageBox.warning(self, "Formato no admitido", "Usa MP4, MOV, MKV o WEBM.")
+            return
+        self.project["outro_file"], self.project["outro_name"], self.project["outro"] = import_shared(self.project["channel"], Path(file)), Path(file).name, True
+        self.loading = True
+        self.outro.setChecked(True)
+        self.loading = False
+        self._load_outro_label()
+        self._settings_changed()
+
+    def reset_outro(self):
+        self.project["outro_file"], self.project["outro_name"] = None, None
+        self._load_outro_label()
+        self._settings_changed()
+
+    def _load_outro_label(self):
+        self.outro_label.setText(self.project.get("outro_name") or (Path(self.project["outro_file"]).name if self.project.get("outro_file") else "Outro del canal"))
 
     def _load_music_label(self):
         music = self.project["music"]
@@ -649,14 +707,14 @@ class StudioWindow(QMainWindow):
             return
         self.project["subtitles"].update({"font": self.font.currentFont().family(), "size": self.sub_size.value(), "bold": self.sub_bold.isChecked()})
         self._apply_subtitle_preview()
-        self._changed()
+        self._settings_changed()
 
     def choose_color(self, key: str):
         color = QColorDialog.getColor(QColor(self.project["subtitles"][key]), self, "Elegir color")
         if color.isValid():
             self.project["subtitles"][key] = color.name().upper()
             self._apply_subtitle_preview()
-            self._changed()
+            self._settings_changed()
 
     # ---- scenes -----------------------------------------------------------
     def _rebuild_scenes(self):

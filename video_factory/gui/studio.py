@@ -23,9 +23,10 @@ from PySide6.QtWidgets import (
 from ..channels import CHANNELS, TARGET_SECONDS, VOICES
 from ..pipeline import _find_ffmpeg
 from ..project import (
-    CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, import_media,
+    CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
     load_project, new_scene, render_project, save_project, split_script, synthesize_voice, voice_defaults,
 )
+from .frame_preview import compose_preview
 from .media_dialog import MediaDialog
 from .workers import run_task
 
@@ -116,6 +117,11 @@ class StudioWindow(QMainWindow):
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(500)
         self.save_timer.timeout.connect(self._save_now)
+        self.frame_timer = QTimer(self)
+        self.frame_timer.setSingleShot(True)
+        self.frame_timer.setInterval(120)
+        self.frame_timer.timeout.connect(self._refresh_frame)
+        self.frames_pending: set[Path] = set()
 
         splitter = QSplitter()
         splitter.addWidget(self._build_general())
@@ -250,7 +256,7 @@ class StudioWindow(QMainWindow):
         layout.addWidget(self.detail_title)
         self.preview = QLabel("Sin recurso visual")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumHeight(380)
+        self.preview.setMinimumSize(120, 380)
         self.preview.setStyleSheet("background: #111; color: #bbb; border-radius: 8px;")
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video = QVideoWidget()
@@ -282,6 +288,7 @@ class StudioWindow(QMainWindow):
         self.player.durationChanged.connect(lambda ms: self.seek.setRange(0, ms))
         self.player.playbackStateChanged.connect(lambda state: self.play_btn.setText("⏸" if state == QMediaPlayer.PlaybackState.PlayingState else "▶"))
         self.video.installEventFilter(self)
+        self.preview.installEventFilter(self)
         buttons = QHBoxLayout()
         pick = QPushButton("Elegir o cambiar imagen / video…")
         pick.clicked.connect(lambda: self.pick_media(self.current))
@@ -377,6 +384,8 @@ class StudioWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.video and event.type() == QEvent.Type.MouseButtonPress:
             self._toggle_play()
+        elif obj is self.preview and event.type() == QEvent.Type.Resize:
+            self.frame_timer.start()
         return super().eventFilter(obj, event)
 
     # ---- project handling -------------------------------------------------
@@ -431,6 +440,7 @@ class StudioWindow(QMainWindow):
     def _changed(self):
         if not self.loading:
             self.save_timer.start()
+            self.frame_timer.start()
 
     def _save_now(self):
         self.save_timer.stop()
@@ -548,6 +558,7 @@ class StudioWindow(QMainWindow):
 
     def _apply_subtitle_preview(self):
         sub = self.project["subtitles"]
+        self.frame_timer.start()
         for button, key in ((self.sub_color, "color"), (self.sub_outline, "outline")):
             color = QColor(sub[key])
             button.setStyleSheet(f"background: {sub[key]}; color: {'black' if color.lightness() > 128 else 'white'};")
@@ -585,6 +596,41 @@ class StudioWindow(QMainWindow):
         self.current = min(self.current, len(self.cards) - 1)
         self.select_scene(self.current)
 
+    def _refresh_frame(self):
+        """Draw the current scene's framing and subtitles in the preview area (skipped while a video preview plays)."""
+        if not self.project.get("scenes") or self.stack.currentIndex() != 0:
+            return
+        scene = self.project["scenes"][self.current]
+        media = scene.get("media")
+        frame = self._video_frame(scene) if media and media.get("type") == "video" else None
+        pixmap = compose_preview(self.folder, scene, self.project["subtitles"], max(300, self.preview.height() - 8), frame)
+        if pixmap is None:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText("Sin recurso visual" if not scene.get("media") else "Video (sin miniatura)")
+        else:
+            self.preview.setPixmap(pixmap)
+
+    def _video_frame(self, scene: dict) -> Path | None:
+        """Frame of the clip at the chosen start second; extracts it in the background the first time and refreshes when ready."""
+        media, start = scene["media"], float(scene.get("start") or 0)
+        target = self.folder / "render" / "frames" / f"{Path(media['path']).stem}_{start:.1f}.jpg"
+        if target.is_file():
+            return target
+        ffmpeg = _find_ffmpeg()
+        if ffmpeg and target not in self.frames_pending:
+            self.frames_pending.add(target)
+            source = self.folder / media["path"]
+            run_task(self, lambda: extract_frame(ffmpeg, source, start, target), self._frame_ready, self._frame_failed)
+        return None
+
+    def _frame_ready(self, target):
+        self.frames_pending.discard(target)
+        self._refresh_frame()
+
+    def _frame_failed(self, error: str):
+        self.frames_pending.clear()
+        self._say(error)
+
     def _scene_text_edited(self):
         self._update_total()
         self._changed()
@@ -612,13 +658,7 @@ class StudioWindow(QMainWindow):
             widget.setEnabled(is_image)
         for widget in (self.start_label, self.start):
             widget.setEnabled(bool(media) and not is_image)
-        source = media and (media["path"] if is_image else media.get("thumb"))
-        pixmap = QPixmap(str(self.folder / source)) if source else QPixmap()
-        if pixmap.isNull():
-            self.preview.setPixmap(QPixmap())
-            self.preview.setText("Sin recurso visual" if not media else "Video (sin miniatura)")
-        else:
-            self.preview.setPixmap(pixmap.scaled(self.preview.width() - 8, max(self.preview.height() - 8, 200), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self._refresh_frame()
         self.loading = False
         self._update_total()
 

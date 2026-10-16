@@ -135,9 +135,18 @@ def import_media(folder: Path, source: Path) -> str:
 
 def make_thumbnail(ffmpeg: str, media: Path, target: Path) -> Path:
     """Write a small JPEG preview (first frame for videos) and return its path."""
-    proc = subprocess.run([ffmpeg, "-y", "-ss", "0.5" if media.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm"} else "0", "-i", str(media), "-frames:v", "1", "-vf", "scale=320:-2", str(target)], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([ffmpeg, "-y", "-ss", "0.5" if media.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm"} else "0", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
     if proc.returncode or not target.is_file():
-        proc = subprocess.run([ffmpeg, "-y", "-i", str(media), "-frames:v", "1", "-vf", "scale=320:-2", str(target)], capture_output=True, text=True, timeout=60)
+        proc = subprocess.run([ffmpeg, "-y", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
+    return target
+
+
+def extract_frame(ffmpeg: str, media: Path, second: float, target: Path) -> Path:
+    """Write the video frame at `second` as a 640 px wide JPEG (used to preview the chosen start of a clip)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run([ffmpeg, "-y", "-ss", f"{second:.2f}", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
+    if proc.returncode or not target.is_file():
+        raise RuntimeError(f"No hay un fotograma en el segundo {second:.1f} de este video.")
     return target
 
 
@@ -164,7 +173,12 @@ def _frame_graph(crop: str, k: int = 1) -> str:
     return f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30,setsar=1[l]"
 
 
-def _caption_chunks(text: str, max_chars: int) -> list[str]:
+def wrap_width_for(size: int) -> int:
+    """Characters per caption line so large subtitles fit inside the 1080 px frame."""
+    return max(8, int(900 / (int(size) * 0.52)))
+
+
+def caption_chunks(text: str, max_chars: int) -> list[str]:
     """Group words into caption chunks of at most max_chars characters."""
     chunks, current = [], ""
     for word in text.split():
@@ -204,7 +218,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     (folder / "voice").mkdir(exist_ok=True)
     sub = project["subtitles"]
     style_line = "\n".join([subtitle_style_line(sub), subtitle_style_line(sub, "Middle", 5, 0), subtitle_style_line(sub, "Top", 8, 260)])
-    wrap_width = max(8, int(900 / (int(project["subtitles"]["size"]) * 0.52)))
+    wrap_width = wrap_width_for(project["subtitles"]["size"])
     k = 1 if preview else 2
     ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(style=style_line)], [], [], [], 0.0
     for number, scene in enumerate(scenes, start=1):
@@ -254,7 +268,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         scene_videos.append(video_out)
 
         spoken = length - SCENE_PAUSE if dialogue else 0
-        chunks = _caption_chunks(dialogue, wrap_width * 2)
+        chunks = caption_chunks(dialogue, wrap_width * 2)
         total_words = max(1, sum(len(c.split()) for c in chunks))
         offset = cursor
         for chunk in chunks if scene.get("show_subtitles", True) else []:

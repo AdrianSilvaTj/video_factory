@@ -21,11 +21,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..channels import CHANNELS, TARGET_SECONDS, VOICES
+from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
     CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
     load_project, new_scene, render_project, save_project, split_script, synthesize_voice, voice_defaults,
 )
+from ..storage import APP_ROOT
 from .frame_preview import compose_preview
 from .media_dialog import MediaDialog
 from .workers import run_task
@@ -124,8 +126,11 @@ class StudioWindow(QMainWindow):
         self.frames_pending: set[Path] = set()
 
         splitter = QSplitter()
-        splitter.addWidget(self._build_general())
-        splitter.addWidget(self._build_scenes())
+        self.busy = False
+        self.general_panel = self._build_general()
+        self.scenes_panel = self._build_scenes()
+        splitter.addWidget(self.general_panel)
+        splitter.addWidget(self.scenes_panel)
         splitter.addWidget(self._build_detail())
         splitter.setSizes([300, 480, 560])
         self.setCentralWidget(splitter)
@@ -250,7 +255,22 @@ class StudioWindow(QMainWindow):
 
     def _build_detail(self) -> QWidget:
         top = QWidget()
-        layout = QVBoxLayout(top)
+        outer = QVBoxLayout(top)
+        self.detail_body = QWidget()
+        outer.addWidget(self.detail_body, 1)
+        self.progress_row = QWidget()
+        progress_layout = QHBoxLayout(self.progress_row)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        self.progress = QProgressBar()
+        progress_layout.addWidget(self.progress, 1)
+        self.cancel_btn = QPushButton("Cancelar")
+        self.cancel_btn.setToolTip("Detiene el proceso en curso")
+        self.cancel_btn.clicked.connect(self._cancel)
+        progress_layout.addWidget(self.cancel_btn)
+        self.progress_row.setVisible(False)
+        outer.addWidget(self.progress_row)
+        layout = QVBoxLayout(self.detail_body)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.detail_title = QLabel("Escena")
         self.detail_title.setStyleSheet("font-size: 16px; font-weight: 700;")
         layout.addWidget(self.detail_title)
@@ -340,9 +360,6 @@ class StudioWindow(QMainWindow):
         self.render_btn.setStyleSheet("font-weight: 700; padding: 8px;")
         self.render_btn.clicked.connect(self.render)
         layout.addWidget(self.render_btn)
-        self.progress = QProgressBar()
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
         self.open_btn = QWidget()
         open_row = QHBoxLayout(self.open_btn)
         open_row.setContentsMargins(0, 0, 0, 0)
@@ -448,8 +465,37 @@ class StudioWindow(QMainWindow):
             save_project(self.folder, self.project)
 
     def closeEvent(self, event):
+        if self.busy:
+            QMessageBox.warning(self, "Proceso en curso", "Hay un proceso en curso. Espera a que termine para cerrar la aplicación.")
+            event.ignore()
+            return
         self._save_now()
         super().closeEvent(event)
+
+    def _set_busy(self, busy: bool):
+        """Lock every control (the log stays usable) while a blocking process runs."""
+        self.busy = busy
+        for widget in (self.general_panel, self.scenes_panel, self.detail_body):
+            widget.setEnabled(not busy)
+        self.progress_row.setVisible(busy)
+        if busy:
+            proc.reset()
+            self.progress.setRange(0, 0)
+            self.cancel_btn.setEnabled(True)
+            QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+
+    def _cancel(self):
+        proc.cancel_all()
+        self.cancel_btn.setEnabled(False)
+        self._say("Cancelando…")
+
+    def _was_cancelled(self, error: str) -> bool:
+        if error == proc.CANCELLED:
+            self._say("Proceso cancelado.")
+            return True
+        return False
 
     # ---- general options --------------------------------------------------
     def _options_changed(self, *_):
@@ -510,17 +556,20 @@ class StudioWindow(QMainWindow):
     def test_voice(self):
         self._save_now()
         folder, voice, settings = self.folder, self.project["voice"], dict(self.project["voice_settings"])
-        self.test_btn.setEnabled(False)
+        self._set_busy(True)
         self._say("Generando la muestra de voz…")
         run_task(self, lambda: synthesize_voice(folder, "Hola, así sonará la narración de tu video.", voice, settings, _find_ffmpeg()), self._test_ready, self._test_failed)
 
     def _test_ready(self, wav):
-        self.test_btn.setEnabled(True)
+        self._set_busy(False)
+        self._say("Muestra de voz lista.")
         self.test_player.setSource(QUrl.fromLocalFile(str(wav)))
         self.test_player.play()
 
     def _test_failed(self, error: str):
-        self.test_btn.setEnabled(True)
+        self._set_busy(False)
+        if self._was_cancelled(error):
+            return
         self._say("ERROR: " + error)
 
     def pick_music(self):
@@ -742,13 +791,13 @@ class StudioWindow(QMainWindow):
         self._stop_preview()
         folder = self.folder
         self.preview_index = index
-        self.preview_btn.setEnabled(False)
+        self._set_busy(True)
         self._say("Generando la vista previa de la escena (la primera vez sintetiza la voz)…")
         run_task(self, lambda: render_project(folder, only_scene=index), self._preview_ready, self._preview_failed)
 
     def _preview_ready(self, report: dict):
-        self.preview_btn.setEnabled(True)
-        self._say("")
+        self._set_busy(False)
+        self._say("Vista previa de la escena lista.")
         if self.preview_index == self.current:
             self.player.setSource(QUrl.fromLocalFile(report["output"]))
             self.stack.setCurrentIndex(1)
@@ -756,7 +805,9 @@ class StudioWindow(QMainWindow):
             self.player.play()
 
     def _preview_failed(self, error: str):
-        self.preview_btn.setEnabled(True)
+        self._set_busy(False)
+        if self._was_cancelled(error):
+            return
         self._say("ERROR: " + error)
 
     # ---- render -----------------------------------------------------------
@@ -764,11 +815,9 @@ class StudioWindow(QMainWindow):
         self._save_now()
         self._stop_preview()
         folder = self.folder
-        self.render_btn.setEnabled(False)
+        self._set_busy(True)
         self.open_btn.setVisible(False)
-        self.progress.setVisible(True)
-        self.progress.setRange(0, 0)
-        self._say("Preparando el render…")
+        self._say(f"Renderizando el video ({len(self.project['scenes'])} escenas)…")
         run_task(self, lambda progress: render_project(folder, progress=lambda n, total: progress((n, total))), self._rendered, self._render_failed, self._render_progress)
 
     def _render_progress(self, step):
@@ -778,14 +827,14 @@ class StudioWindow(QMainWindow):
         self._say(f"Preparando escena {number} de {total} (voz, encuadre y zoom)…")
 
     def _render_failed(self, error: str):
-        self.render_btn.setEnabled(True)
-        self.progress.setVisible(False)
+        self._set_busy(False)
+        if self._was_cancelled(error):
+            return
         self._say("ERROR: " + error)
         QMessageBox.critical(self, "El render falló", error[-1200:])
 
     def _rendered(self, report: dict):
-        self.render_btn.setEnabled(True)
-        self.progress.setVisible(False)
+        self._set_busy(False)
         self.open_btn.setVisible(True)
         self._say(f"Listo: {report['duration_seconds']} s. " + " ".join(report["warnings"]) + f"\n{report['output']}")
 
@@ -805,8 +854,13 @@ def _install_error_hook():
 
 
 def main():
+    if sys.platform == "win32":
+        import ctypes
+        # Own AppUserModelID so the taskbar shows this app's icon instead of Python's.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Genxapp.VideoFactory")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(str(APP_ROOT / "assets" / "video_factory.ico")))
     _install_error_hook()
     window = StudioWindow()
     window.show()

@@ -41,7 +41,7 @@ def main() -> int:
     wav_path = args.output.with_suffix(".wav")
     proc = subprocess.run(
         [args.ffmpeg, "-y", "-i", str(args.output), "-vn", "-ac", "1", "-ar", "24000", "-c:a", "pcm_s16le", str(wav_path)],
-        capture_output=True, text=True, timeout=90,
+        capture_output=True, text=True, timeout=90, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode or not wav_path.is_file():
         raise RuntimeError(proc.stderr[-1600:] or "FFmpeg no pudo convertir la voz neural a WAV.")

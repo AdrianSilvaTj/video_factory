@@ -6,6 +6,7 @@ La duración de cada escena la fija su diálogo (voz sintetizada) más una pausa
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from .channels import _AUDIO_FMT, CHANNELS, TARGET_SECONDS, VOICES
 from .pipeline import EDGE_TTS_PACKAGES, _find_ffmpeg
+from .proc import run
 from .storage import APP_ROOT, load_json, now_iso, save_json, slug
 
 PROJECTS_DIR = APP_ROOT / "data" / "projects"
@@ -66,7 +68,7 @@ def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ff
     wav = folder / "voice" / f"{key}.wav"
     wav.parent.mkdir(exist_ok=True)
     if not wav.is_file():
-        proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "synthesize_neural_voice.py"), "--text", text, "--output", str(wav.with_suffix(".mp3")), "--ffmpeg", ffmpeg, "--voice", preset["voice"], "--rate", rate, "--pitch", pitch, "--volume", volume], capture_output=True, text=True, timeout=180)
+        proc = run([sys.executable, str(Path(__file__).resolve().parent / "synthesize_neural_voice.py"), "--text", text, "--output", str(wav.with_suffix(".mp3")), "--ffmpeg", ffmpeg, "--voice", preset["voice"], "--rate", rate, "--pitch", pitch, "--volume", volume], capture_output=True, text=True, timeout=180)
         if proc.returncode or not wav.is_file():
             raise RuntimeError(f"No se pudo generar la voz: {(proc.stderr or proc.stdout)[-800:]}")
     return wav
@@ -135,16 +137,16 @@ def import_media(folder: Path, source: Path) -> str:
 
 def make_thumbnail(ffmpeg: str, media: Path, target: Path) -> Path:
     """Write a small JPEG preview (first frame for videos) and return its path."""
-    proc = subprocess.run([ffmpeg, "-y", "-ss", "0.5" if media.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm"} else "0", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
+    proc = run([ffmpeg, "-y", "-ss", "0.5" if media.suffix.casefold() in {".mp4", ".mov", ".mkv", ".webm"} else "0", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
     if proc.returncode or not target.is_file():
-        proc = subprocess.run([ffmpeg, "-y", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
+        proc = run([ffmpeg, "-y", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
     return target
 
 
 def extract_frame(ffmpeg: str, media: Path, second: float, target: Path) -> Path:
     """Write the video frame at `second` as a 640 px wide JPEG (used to preview the chosen start of a clip)."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run([ffmpeg, "-y", "-ss", f"{second:.2f}", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
+    proc = run([ffmpeg, "-y", "-ss", f"{second:.2f}", "-i", str(media), "-frames:v", "1", "-vf", "scale=640:-2", str(target)], capture_output=True, text=True, timeout=60)
     if proc.returncode or not target.is_file():
         raise RuntimeError(f"No hay un fotograma en el segundo {second:.1f} de este video.")
     return target
@@ -237,7 +239,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             length = float(scene.get("duration") or EMPTY_SCENE_SECONDS)
             audio_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
         audio_out = out_dir / "scenes" / f"scene-{number:02d}.wav"
-        proc = subprocess.run([ffmpeg, "-y", *audio_input, "-af", f"{_AUDIO_FMT},apad=whole_dur={length:.4f}", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=120)
+        proc = run([ffmpeg, "-y", *audio_input, "-af", f"{_AUDIO_FMT},apad=whole_dur={length:.4f}", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=120)
         if proc.returncode or not audio_out.is_file():
             raise RuntimeError(f"Falló el audio de la escena {number}: {proc.stderr[-800:]}")
         scene_audios.append(audio_out)
@@ -253,7 +255,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             x1, y2 = f"{1080 * k}-{x0}", f"{1920 * k}-{y0}"
             # Fit the photo once into a 2x frame; the zoom then only resamples that small still.
             fitted = out_dir / "scenes" / f"scene-{number:02d}-frame.png"
-            proc = subprocess.run([ffmpeg, "-y", "-i", str(media), "-filter_complex", _frame_graph(scene["crop"], k).replace("fps=30,", "") .replace("[l]", "[o]"), "-map", "[o]", "-frames:v", "1", str(fitted)], capture_output=True, text=True, timeout=300)
+            proc = run([ffmpeg, "-y", "-i", str(media), "-filter_complex", _frame_graph(scene["crop"], k).replace("fps=30,", "") .replace("[l]", "[o]"), "-map", "[o]", "-frames:v", "1", str(fitted)], capture_output=True, text=True, timeout=300)
             if proc.returncode or not fitted.is_file():
                 raise RuntimeError(f"No se pudo preparar la imagen de la escena {number}: {proc.stderr[-800:]}")
             media = fitted
@@ -262,7 +264,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             graph = _frame_graph(scene["crop"]) + ";[l]null[v]"
         input_args = ["-loop", "1", "-framerate", "30", "-i", str(media)] if is_image else ["-stream_loop", "-1", "-ss", f"{float(scene.get('start') or 0):.3f}", "-i", str(media)]
         video_out = out_dir / "scenes" / f"scene-{number:02d}.mp4"
-        proc = subprocess.run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=300)
+        proc = run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=300)
         if proc.returncode or not video_out.is_file():
             raise RuntimeError(f"Falló el video de la escena {number}: {proc.stderr[-1200:]}")
         scene_videos.append(video_out)
@@ -306,10 +308,15 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     else:
         maps = ["-map", "[main_video]", "-map", "[main_audio]"]
     output = out_dir / ("scene.mp4" if preview else "video.mp4")
-    cmd += ["-filter_complex", ";".join(graph), *maps, "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-b:v", "2M" if preview else "8M", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(output)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if proc.returncode or not output.is_file():
-        raise RuntimeError("Falló el render final: " + proc.stderr[-3000:])
+    partial = output.with_name(output.stem + ".part.mp4")
+    cmd += ["-filter_complex", ";".join(graph), *maps, "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-b:v", "2M" if preview else "8M", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(partial)]
+    try:
+        proc = run(cmd, capture_output=True, text=True, timeout=1800)
+        if proc.returncode or not partial.is_file():
+            raise RuntimeError("Falló el render final: " + proc.stderr[-3000:])
+        os.replace(partial, output)
+    finally:
+        partial.unlink(missing_ok=True)
     if preview:
         return {"status": "preview", "output": str(output), "duration_seconds": round(total, 2)}
 

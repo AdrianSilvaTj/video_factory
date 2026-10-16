@@ -180,7 +180,7 @@ class StudioWindow(QMainWindow):
         music_buttons.addWidget(reset_music)
         form.addRow(music_buttons)
         self.music_btn = QPushButton("▶ Escuchar música")
-        self.music_btn.setToolTip("Reproduce la música elegida (la del canal o tu archivo) a volumen completo")
+        self.music_btn.setToolTip("Reproduce la música elegida (la del canal o tu archivo) con el volumen del slider")
         self.music_btn.clicked.connect(self._toggle_music)
         form.addRow(self.music_btn)
         self.music_player = QMediaPlayer(self)
@@ -514,6 +514,7 @@ class StudioWindow(QMainWindow):
             return
         self.project.update({"voice": self.voice.currentData(), "outro": self.outro.isChecked()})
         self.project["music"].update({"enabled": self.music.isChecked(), "gain": self.gain.value() / 100})
+        self.music_audio.setVolume(self.project["music"]["gain"])
         self._changed()
 
     def _channel_changed(self, *_):
@@ -593,6 +594,7 @@ class StudioWindow(QMainWindow):
         if not path.is_file():
             self._say(f"No encuentro el archivo de música: {path}")
             return
+        self.music_audio.setVolume(music["gain"])
         self.music_player.setSource(QUrl.fromLocalFile(str(path)))
         self.music_player.play()
 

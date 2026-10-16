@@ -179,6 +179,14 @@ class StudioWindow(QMainWindow):
         reset_music.clicked.connect(self.reset_music)
         music_buttons.addWidget(reset_music)
         form.addRow(music_buttons)
+        self.music_btn = QPushButton("▶ Escuchar música")
+        self.music_btn.setToolTip("Reproduce la música elegida (la del canal o tu archivo) a volumen completo")
+        self.music_btn.clicked.connect(self._toggle_music)
+        form.addRow(self.music_btn)
+        self.music_player = QMediaPlayer(self)
+        self.music_audio = QAudioOutput()
+        self.music_player.setAudioOutput(self.music_audio)
+        self.music_player.playbackStateChanged.connect(lambda state: self.music_btn.setText("⏹ Detener música" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Escuchar música"))
         self.outro = QCheckBox("Incluir outro del canal")
         self.outro.toggled.connect(self._options_changed)
         form.addRow(self.outro)
@@ -432,6 +440,7 @@ class StudioWindow(QMainWindow):
 
     def open_project(self, folder: Path):
         self._save_now()
+        self._stop_music()
         self.loading = True
         self.folder, self.project = folder, load_project(folder)
         self.current = 0
@@ -475,6 +484,8 @@ class StudioWindow(QMainWindow):
     def _set_busy(self, busy: bool):
         """Lock every control (the log stays usable) while a blocking process runs."""
         self.busy = busy
+        if busy:
+            self._stop_music()
         for widget in (self.general_panel, self.scenes_panel, self.detail_body):
             widget.setEnabled(not busy)
         self.progress_row.setVisible(busy)
@@ -507,6 +518,7 @@ class StudioWindow(QMainWindow):
 
     def _channel_changed(self, *_):
         channel = CHANNELS[self.channel.currentData()]
+        self._stop_music()
         self.project["channel"] = self.channel.currentData()
         self.loading = True
         self.voice.setCurrentIndex(self.voice.findData(channel["default_voice"]))
@@ -572,6 +584,21 @@ class StudioWindow(QMainWindow):
             return
         self._say("ERROR: " + error)
 
+    def _toggle_music(self):
+        if self.music_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.music_player.stop()
+            return
+        music = self.project["music"]
+        path = self.folder / music["path"] if music["path"] else CHANNELS[self.project["channel"]]["music"]
+        if not path.is_file():
+            self._say(f"No encuentro el archivo de música: {path}")
+            return
+        self.music_player.setSource(QUrl.fromLocalFile(str(path)))
+        self.music_player.play()
+
+    def _stop_music(self):
+        self.music_player.stop()
+
     def pick_music(self):
         extensions = " ".join("*" + e for e in sorted(MUSIC_EXTENSIONS))
         file, _ = QFileDialog.getOpenFileName(self, "Elegir música de fondo", "", f"Audio ({extensions})")
@@ -580,6 +607,7 @@ class StudioWindow(QMainWindow):
         if Path(file).suffix.casefold() not in MUSIC_EXTENSIONS:
             QMessageBox.warning(self, "Formato no admitido", "Usa MP3, WAV, M4A, OGG, AAC o FLAC.")
             return
+        self._stop_music()
         self.project["music"].update({"path": import_media(self.folder, Path(file)), "enabled": True, "name": Path(file).name})
         self.loading = True
         self.music.setChecked(True)
@@ -588,6 +616,7 @@ class StudioWindow(QMainWindow):
         self._changed()
 
     def reset_music(self):
+        self._stop_music()
         self.project["music"].update({"path": None, "name": None})
         self._load_music_label()
         self._changed()

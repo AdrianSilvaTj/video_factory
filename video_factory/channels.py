@@ -6,7 +6,11 @@ from .pipeline import APP_ROOT, BACKGROUND_MUSIC, BACKGROUND_MUSIC_GAIN, SYNCHRO
 TARGET_SECONDS = 45
 VOICES = {
     "male": {"label": "Masculina (Gonzalo, Colombia)", "voice": "es-CO-GonzaloNeural", "rate": "-4%", "pitch": "-1Hz", "gender": "male"},
+    "male_neutral": {"label": "Masculina neutral (Alonso, español latino)", "voice": "es-US-AlonsoNeural", "rate": "+0%", "pitch": "+0Hz", "gender": "male"},
+    "male_mx": {"label": "Masculina (Jorge, México)", "voice": "es-MX-JorgeNeural", "rate": "+0%", "pitch": "+0Hz", "gender": "male"},
     "female": {"label": "Femenina (Dalia, México — Canal Belleza)", "voice": "es-MX-DaliaNeural", "rate": "+9%", "pitch": "+4Hz", "gender": "female"},
+    "female_neutral": {"label": "Femenina neutral (Paloma, español latino)", "voice": "es-US-PalomaNeural", "rate": "+0%", "pitch": "+0Hz", "gender": "female"},
+    "female_co": {"label": "Femenina (Salomé, Colombia)", "voice": "es-CO-SalomeNeural", "rate": "+0%", "pitch": "+0Hz", "gender": "female"},
 }
 CHANNELS = {
     "que-curioso": {"label": "Qué curioso…¿no?", "music": BACKGROUND_MUSIC, "music_gain": BACKGROUND_MUSIC_GAIN, "outro": SYNCHRONIZED_OUTRO, "subtitles": {"font": "Arial", "size": 128, "color": "#FFFFFF", "outline": "#241B10", "bold": True}, "default_voice": "male"},

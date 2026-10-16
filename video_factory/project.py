@@ -50,6 +50,28 @@ _ASS_HEADER = (
 )
 
 
+def voice_defaults(voice_key: str) -> dict:
+    """Speed (%), pitch (Hz) and volume (%) offsets of a voice preset, as integers."""
+    preset = VOICES[voice_key]
+    return {"rate": int(preset["rate"].rstrip("%")), "pitch": int(preset["pitch"].removesuffix("Hz")), "volume": 0}
+
+
+def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ffmpeg: str) -> Path:
+    """Return the cached WAV for this text and voice settings, synthesizing it with Edge neural TTS if needed."""
+    if not EDGE_TTS_PACKAGES.is_dir():
+        raise RuntimeError(f"Falta edge-tts en {EDGE_TTS_PACKAGES}.")
+    preset = VOICES[voice_key]
+    rate, pitch, volume = f"{settings['rate']:+d}%", f"{settings['pitch']:+d}Hz", f"{settings.get('volume', 0):+d}%"
+    key = hashlib.sha256(f"{text}|{preset['voice']}|{rate}|{pitch}|{volume}".encode("utf-8")).hexdigest()[:16]
+    wav = folder / "voice" / f"{key}.wav"
+    wav.parent.mkdir(exist_ok=True)
+    if not wav.is_file():
+        proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "synthesize_neural_voice.py"), "--text", text, "--output", str(wav.with_suffix(".mp3")), "--ffmpeg", ffmpeg, "--voice", preset["voice"], "--rate", rate, "--pitch", pitch, "--volume", volume], capture_output=True, text=True, timeout=180)
+        if proc.returncode or not wav.is_file():
+            raise RuntimeError(f"No se pudo generar la voz: {(proc.stderr or proc.stdout)[-800:]}")
+    return wav
+
+
 def new_scene(dialogue: str = "") -> dict:
     return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
 
@@ -60,7 +82,7 @@ def create_project(name: str, channel: str = "que-curioso", root: Path | None = 
     folder = (root or PROJECTS_DIR) / f"{slug(name)}-{uuid.uuid4().hex[:4]}"
     (folder / "assets").mkdir(parents=True)
     save_json(folder / "project.json", {
-        "schema_version": 1, "name": name, "channel": channel, "voice": CHANNELS[channel]["default_voice"],
+        "schema_version": 1, "name": name, "channel": channel, "voice": CHANNELS[channel]["default_voice"], "voice_settings": voice_defaults(CHANNELS[channel]["default_voice"]),
         "music": {"enabled": True, "gain": CHANNELS[channel]["music_gain"], "path": None}, "outro": CHANNELS[channel]["outro"] is not None,
         "subtitles": dict(CHANNELS[channel]["subtitles"]), "scenes": [new_scene()], "created_at": now_iso(),
     })
@@ -70,6 +92,7 @@ def create_project(name: str, channel: str = "que-curioso", root: Path | None = 
 def load_project(folder: Path) -> dict:
     project = load_json(folder / "project.json")
     project.pop("subtitle_style", None)
+    project.setdefault("voice_settings", voice_defaults(project["voice"]))
     project.setdefault("subtitles", dict(CHANNELS[project["channel"]]["subtitles"]))
     project["music"].setdefault("path", None)
     return project
@@ -189,12 +212,10 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             progress(number, len(scenes))
         dialogue = scene["dialogue"].strip()
         if dialogue:
-            key = hashlib.sha256(f"{dialogue}|{preset['voice']}|{preset['rate']}|{preset['pitch']}".encode("utf-8")).hexdigest()[:16]
-            wav = folder / "voice" / f"{key}.wav"
-            if not wav.is_file():
-                proc = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "synthesize_neural_voice.py"), "--text", dialogue, "--output", str(wav.with_suffix(".mp3")), "--ffmpeg", ffmpeg, "--voice", preset["voice"], "--rate", preset["rate"], "--pitch", preset["pitch"]], capture_output=True, text=True, timeout=180)
-                if proc.returncode or not wav.is_file():
-                    raise RuntimeError(f"No se pudo generar la voz de la escena {number}: {(proc.stderr or proc.stdout)[-800:]}")
+            try:
+                wav = synthesize_voice(folder, dialogue, project["voice"], project["voice_settings"], ffmpeg)
+            except RuntimeError as exc:
+                raise RuntimeError(f"Escena {number}: {exc}") from exc
             with wave.open(str(wav), "rb") as audio:
                 length = audio.getnframes() / audio.getframerate() + SCENE_PAUSE
             audio_input = ["-i", str(wav)]

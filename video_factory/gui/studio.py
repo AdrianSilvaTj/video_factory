@@ -21,9 +21,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..channels import CHANNELS, TARGET_SECONDS, VOICES
+from ..pipeline import _find_ffmpeg
 from ..project import (
     CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, import_media,
-    load_project, new_scene, render_project, save_project, split_script,
+    load_project, new_scene, render_project, save_project, split_script, synthesize_voice, voice_defaults,
 )
 from .media_dialog import MediaDialog
 from .workers import run_task
@@ -147,7 +148,7 @@ class StudioWindow(QMainWindow):
         self.voice = QComboBox()
         for key, preset in VOICES.items():
             self.voice.addItem(preset["label"], key)
-        self.voice.activated.connect(self._options_changed)
+        self.voice.activated.connect(self._voice_changed)
         form.addRow("Voz:", self.voice)
         self.music = QCheckBox("Música de fondo")
         self.music.toggled.connect(self._options_changed)
@@ -171,6 +172,25 @@ class StudioWindow(QMainWindow):
         self.outro.toggled.connect(self._options_changed)
         form.addRow(self.outro)
         layout.addWidget(options)
+
+        tune = QGroupBox("Ajustes de la voz")
+        form = QFormLayout(tune)
+        self.voice_rate = self._voice_slider(form, "Velocidad:", -50, 50, "%")
+        self.voice_pitch = self._voice_slider(form, "Tono:", -30, 30, " Hz")
+        self.voice_volume = self._voice_slider(form, "Volumen:", -50, 50, "%")
+        tune_buttons = QHBoxLayout()
+        reset_voice = QPushButton("Restablecer")
+        reset_voice.setToolTip("Vuelve a los valores recomendados de esta voz")
+        reset_voice.clicked.connect(self._voice_changed)
+        tune_buttons.addWidget(reset_voice)
+        self.test_btn = QPushButton("▶ Probar voz")
+        self.test_btn.clicked.connect(self.test_voice)
+        tune_buttons.addWidget(self.test_btn)
+        form.addRow(tune_buttons)
+        self.test_player = QMediaPlayer(self)
+        self.test_audio = QAudioOutput()
+        self.test_player.setAudioOutput(self.test_audio)
+        layout.addWidget(tune)
 
         subs = QGroupBox("Subtítulos")
         form = QFormLayout(subs)
@@ -400,6 +420,7 @@ class StudioWindow(QMainWindow):
         self.outro.setChecked(self.project["outro"])
         self._load_subtitles()
         self._load_music_label()
+        self._load_voice_settings()
         self.title.setText(self.project["name"])
         self.setWindowTitle(f"Video Factory — {self.project['name']}")
         self._say("")
@@ -436,9 +457,61 @@ class StudioWindow(QMainWindow):
         self.gain.setValue(round(channel["music_gain"] * 100))
         self.outro.setChecked(channel["outro"] is not None)
         self.project["subtitles"] = dict(channel["subtitles"])
+        self.project["voice"] = self.voice.currentData()
+        self.project["voice_settings"] = voice_defaults(self.voice.currentData())
         self.loading = False
         self._load_subtitles()
+        self._load_voice_settings()
         self._options_changed()
+
+    def _voice_slider(self, form, text: str, low: int, high: int, suffix: str) -> QSlider:
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(low, high)
+        label = QLabel()
+        label.setMinimumWidth(56)
+        slider.valueChanged.connect(lambda value: label.setText(f"{value:+d}{suffix}"))
+        slider.valueChanged.connect(self._voice_settings_changed)
+        row = QHBoxLayout()
+        row.addWidget(slider, 1)
+        row.addWidget(label)
+        form.addRow(text, row)
+        return slider
+
+    def _load_voice_settings(self):
+        settings = self.project["voice_settings"]
+        self.loading = True
+        for slider, key in ((self.voice_rate, "rate"), (self.voice_pitch, "pitch"), (self.voice_volume, "volume")):
+            slider.setValue(int(settings.get(key, 0)))
+            slider.valueChanged.emit(slider.value())
+        self.loading = False
+
+    def _voice_changed(self, *_):
+        """A voice was picked (or 'Restablecer' pressed): go back to that voice's recommended settings."""
+        self.project["voice"] = self.voice.currentData()
+        self.project["voice_settings"] = voice_defaults(self.voice.currentData())
+        self._load_voice_settings()
+        self._changed()
+
+    def _voice_settings_changed(self, *_):
+        if not self.loading:
+            self.project["voice_settings"] = {"rate": self.voice_rate.value(), "pitch": self.voice_pitch.value(), "volume": self.voice_volume.value()}
+            self._changed()
+
+    def test_voice(self):
+        self._save_now()
+        folder, voice, settings = self.folder, self.project["voice"], dict(self.project["voice_settings"])
+        self.test_btn.setEnabled(False)
+        self._say("Generando la muestra de voz…")
+        run_task(self, lambda: synthesize_voice(folder, "Hola, así sonará la narración de tu video.", voice, settings, _find_ffmpeg()), self._test_ready, self._test_failed)
+
+    def _test_ready(self, wav):
+        self.test_btn.setEnabled(True)
+        self.test_player.setSource(QUrl.fromLocalFile(str(wav)))
+        self.test_player.play()
+
+    def _test_failed(self, error: str):
+        self.test_btn.setEnabled(True)
+        self._say("ERROR: " + error)
 
     def pick_music(self):
         extensions = " ".join("*" + e for e in sorted(MUSIC_EXTENSIONS))

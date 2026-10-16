@@ -16,6 +16,7 @@ def main() -> int:
     parser.add_argument("--voice", default="es-CO-GonzaloNeural")
     parser.add_argument("--rate", default="-4%")
     parser.add_argument("--pitch", default="-1Hz")
+    parser.add_argument("--volume", default="+0%")
     args = parser.parse_args()
 
     project_root = Path(__file__).resolve().parents[1]
@@ -32,7 +33,7 @@ def main() -> int:
             voice=args.voice,
             rate=args.rate,
             pitch=args.pitch,
-            volume="+0%",
+            volume=args.volume,
         )
         await communicate.save(str(args.output))
 

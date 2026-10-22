@@ -18,6 +18,7 @@ import wave
 from pathlib import Path
 
 from .channels import _AUDIO_FMT, CHANNELS, TARGET_SECONDS, VOICES
+from .clips import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 from .pipeline import EDGE_TTS_PACKAGES, _find_ffmpeg
 from .proc import run
 from .storage import APP_ROOT, load_json, now_iso, save_json, slug
@@ -109,6 +110,21 @@ def last_channel() -> str:
     """Channel of the last settings change; new projects start with it."""
     key = _read_defaults().get("last_channel")
     return key if key in CHANNELS else "que-curioso"
+
+
+def load_search_history() -> list[str]:
+    """Search terms used before, most recent first."""
+    try:
+        return [t for t in json.loads((DEFAULTS_FILE.parent / "search_history.json").read_text(encoding="utf-8")) if isinstance(t, str)]
+    except (OSError, ValueError):
+        return []
+
+
+def add_search_term(term: str, limit: int = 20) -> list[str]:
+    history = [t for t in load_search_history() if t.casefold() != term.casefold()]
+    history = [term.strip(), *history][:limit]
+    save_json(DEFAULTS_FILE.parent / "search_history.json", history)
+    return history
 
 
 SHARED_PREFIX = "shared:"
@@ -219,6 +235,42 @@ def import_media(folder: Path, source: Path) -> str:
     target = folder / "assets" / f"{uuid.uuid4().hex[:6]}_{slug(source.stem)}{source.suffix.casefold()}"
     shutil.copy2(source, target)
     return target.relative_to(folder).as_posix()
+
+
+def load_library(folder: Path) -> dict:
+    """Credits and source data of the media downloaded into this project, keyed by project-relative path."""
+    try:
+        return json.loads((folder / "assets" / "library.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def register_asset(folder: Path, media: dict) -> None:
+    library = load_library(folder)
+    library[media["path"]] = media
+    save_json(folder / "assets" / "library.json", library)
+
+
+def list_assets(folder: Path) -> list[dict]:
+    """Media dicts for every image and video in the project's assets folder, newest first.
+
+    Files downloaded from a bank keep their author and license; anything else counts as the user's own.
+    """
+    library = load_library(folder)
+    for scene in load_project(folder)["scenes"]:
+        if scene.get("media"):
+            library.setdefault(scene["media"]["path"], scene["media"])
+    assets = folder / "assets"
+    files = [f for f in assets.iterdir() if f.is_file() and not f.name.endswith(".thumb.jpg") and f.suffix.casefold() in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS] if assets.is_dir() else []
+    result = []
+    for file in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True):
+        rel = file.relative_to(folder).as_posix()
+        kind = "image" if file.suffix.casefold() in IMAGE_EXTENSIONS else "video"
+        entry = dict(library.get(rel) or {"path": rel, "type": kind, "provider": "Archivo propio", "author": "Aportado por el usuario", "page_url": ""})
+        thumb = file.with_suffix(".thumb.jpg")
+        entry["thumb"] = thumb.relative_to(folder).as_posix() if thumb.is_file() else None
+        result.append(entry)
+    return result
 
 
 def make_thumbnail(ffmpeg: str, media: Path, target: Path) -> Path:

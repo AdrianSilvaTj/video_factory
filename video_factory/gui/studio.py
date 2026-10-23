@@ -10,7 +10,7 @@ from pathlib import Path
 import time
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
+from PySide6.QtGui import QColor, QFont, QIcon, QKeyEvent, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -44,6 +44,7 @@ class SceneCard(QFrame):
     media_requested = Signal(int)
     move_requested = Signal(int, int)
     delete_requested = Signal(int)
+    enter_pressed = Signal(int, str, int)
 
     def __init__(self, index: int, scene: dict, project_dir: Path):
         super().__init__()
@@ -66,6 +67,7 @@ class SceneCard(QFrame):
         self.text.setPlaceholderText("Diálogo de la escena…")
         self.text.setFixedHeight(84)
         self.text.textChanged.connect(self._text_changed)
+        self.text.installEventFilter(self)
         body.addWidget(self.text, 1)
         self.thumb = QPushButton()
         self.thumb.setFixedSize(96, 96)
@@ -95,6 +97,15 @@ class SceneCard(QFrame):
         self.scene["dialogue"] = self.text.toPlainText()
         self.refresh()
         self.edited.emit()
+
+    def eventFilter(self, watched, event):
+        if watched is self.text and event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent) and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            cursor = self.text.textCursor()
+            value = self.text.toPlainText()
+            position = cursor.position()
+            self.enter_pressed.emit(self.index, value[:position], position)
+            return True
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         self.selected.emit(self.index)
@@ -726,6 +737,7 @@ class StudioWindow(QMainWindow):
             card = SceneCard(index, scene, self.folder)
             card.selected.connect(self.select_scene)
             card.edited.connect(self._scene_text_edited)
+            card.enter_pressed.connect(self.split_scene_at_enter)
             card.media_requested.connect(self.pick_media)
             card.move_requested.connect(self.move_scene)
             card.delete_requested.connect(self.delete_scene)
@@ -818,9 +830,31 @@ class StudioWindow(QMainWindow):
         self.total.setText(f"<b>Duración estimada: ~{total:.0f} s</b> <span style='color:{color}'>(objetivo {TARGET_SECONDS} s; la real depende de la voz)</span>")
 
     def add_scene(self):
-        self.project["scenes"].append(new_scene())
-        self.current = len(self.project["scenes"]) - 1
+        index = self.current + 1
+        self.project["scenes"].insert(index, new_scene())
+        self.current = index
         self._rebuild_scenes()
+        self.cards[index].text.setFocus()
+        self._changed()
+
+    def split_scene_at_enter(self, index: int, before: str, position: int):
+        scenes = self.project["scenes"]
+        if not 0 <= index < len(scenes):
+            return
+        card = self.cards[index]
+        value = card.text.toPlainText()
+        cursor = card.text.textCursor()
+        after = value[position:]
+        scenes[index]["dialogue"] = before
+        scenes.insert(index + 1, new_scene(after))
+        self.current = index + 1
+        self._rebuild_scenes()
+        next_card = self.cards[self.current]
+        next_card.text.setFocus()
+        next_cursor = next_card.text.textCursor()
+        next_cursor.movePosition(next_cursor.MoveOperation.Start)
+        next_card.text.setTextCursor(next_cursor)
+        self._update_total()
         self._changed()
 
     def paste_script(self):

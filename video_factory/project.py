@@ -43,6 +43,7 @@ IMAGE_MOTIONS = {
     "zoom_left": "Zoom lateral hacia la izquierda",
     "zoom_right": "Zoom lateral hacia la derecha",
 }
+TEXT_OVERLAY_DEFAULTS = {"text": "", "position": "top", "size": 64, "color": "#FFFFFF"}
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"}
 
 
@@ -88,7 +89,7 @@ def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ff
 
 
 def new_scene(dialogue: str = "") -> dict:
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": True}
 
 
 def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
@@ -217,6 +218,7 @@ def load_project(folder: Path) -> dict:
     project["music"].setdefault("path", None)
     for scene in project.get("scenes", []):
         scene.setdefault("zoom", {"speed": "slow", "direction": "in"})
+        scene["text_overlay"] = {**TEXT_OVERLAY_DEFAULTS, **(scene.get("text_overlay") or {})}
         if scene.get("motion") not in IMAGE_MOTIONS:
             speed = scene["zoom"].get("speed", "slow")
             direction = scene["zoom"].get("direction", "in")
@@ -515,8 +517,28 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         subtitle_settings["margin_v"] = 120
     style_line = "\n".join([subtitle_style_line(subtitle_settings), subtitle_style_line(subtitle_settings, "Middle", 5, 0), subtitle_style_line(subtitle_settings, "Top", 8, 146 if orientation == "landscape" else 260)])
     wrap_width = wrap_width_for(subtitle_settings["size"], frame_width)
+    overlay_styles, overlay_data = [], {}
+    for scene_number, scene in enumerate(scenes, start=1):
+        overlay = {**TEXT_OVERLAY_DEFAULTS, **scene.get("text_overlay", {})}
+        text = str(overlay["text"]).strip()
+        if not text:
+            continue
+        style_name = f"SceneText{scene_number}"
+        position = overlay["position"]
+        alignment = {"top": 8, "middle": 5, "bottom": 2}.get(position, 8)
+        margin_v = (146 if orientation == "landscape" else 260) if position == "top" else 0 if position == "middle" else (120 if orientation == "landscape" else int(sub.get("margin_v", 420)))
+        overlay_style = dict(subtitle_settings)
+        overlay_style.update({"size": round(int(overlay["size"]) * (0.72 if orientation == "landscape" else 1)), "color": overlay["color"], "bold": True})
+        overlay_styles.append(subtitle_style_line(overlay_style, style_name, alignment, margin_v))
+        overlay_size = overlay_style["size"]
+        overlay_width = wrap_width_for(overlay_size, frame_width)
+        safe_text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+        lines = []
+        for paragraph in safe_text.splitlines() or [safe_text]:
+            lines.extend(textwrap.wrap(paragraph, width=overlay_width, break_long_words=False) or [""])
+        overlay_data[scene_number] = (style_name, "\\N".join(lines))
     k = 1 if preview else 2
-    ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(width=frame_width, height=frame_height, style=style_line)], [], [], [], 0.0
+    ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(width=frame_width, height=frame_height, style="\n".join([style_line, *overlay_styles]))], [], [], [], 0.0
     chapter_starts = [(0.0, (project.get("youtube", {}).get("title") or project["name"]).strip())]
     for number, scene in enumerate(scenes, start=1):
         if progress:
@@ -588,6 +610,9 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         chunks = caption_chunks(dialogue, wrap_width * 2)
         total_words = max(1, sum(len(c.split()) for c in chunks))
         offset = cursor
+        if number in overlay_data:
+            style_name, overlay_text = overlay_data[number]
+            ass_lines.append(f"Dialogue: 0,{_stamp(cursor)},{_stamp(cursor + length)},{style_name},,0,0,0,,{overlay_text}\n")
         for chunk in chunks if scene.get("show_subtitles", True) else []:
             span = spoken * len(chunk.split()) / total_words
             text = "\\N".join(textwrap.wrap(chunk.replace("{", "(").replace("}", ")"), width=wrap_width, break_long_words=False))

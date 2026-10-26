@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPixmap
 
-from ..project import caption_chunks, wrap_width_for
+from ..project import TEXT_OVERLAY_DEFAULTS, caption_chunks, wrap_width_for
 
 SAMPLE_TEXT = "Así se verán los subtítulos"
 TOP_MARGIN = 260
@@ -79,6 +79,46 @@ def _draw_subtitles(painter: QPainter, text: str, sub: dict, position: str, widt
         painter.drawPath(path)
 
 
+def _draw_text_overlay(painter: QPainter, overlay: dict, sub: dict, width: int, height: int) -> None:
+    text = str(overlay.get("text", "")).strip()
+    if not text:
+        return
+    landscape = width > height
+    frame_height = 1080 if landscape else 1920
+    k = height / frame_height
+    size = round(int(overlay.get("size", 64)) * (0.72 if landscape else 1))
+    font = QFont(sub["font"])
+    font.setBold(True)
+    font.setPixelSize(100)
+    font.setPixelSize(max(6, round(size * k * 100 / QFontMetricsF(font).height())))
+    metrics = QFontMetricsF(font)
+    frame_width = round(width / k)
+    wrap_width = wrap_width_for(size, frame_width)
+    lines = []
+    for paragraph in text.splitlines() or [text]:
+        lines.extend(textwrap.wrap(paragraph, width=wrap_width, break_long_words=False) or [""])
+    line_height = size * k
+    block_height = line_height * len(lines)
+    position = overlay.get("position", "top")
+    if position == "top":
+        top = (146 if landscape else TOP_MARGIN) * k
+    elif position == "middle":
+        top = (height - block_height) / 2
+    else:
+        top = height - (120 if landscape else int(sub.get("margin_v", 420))) * k - block_height
+    outline = max(4, round(size / 12)) * k
+    for index, line in enumerate(lines):
+        path = QPainterPath()
+        x = max(12 * k, (width - metrics.horizontalAdvance(line)) / 2)
+        path.addText(x, top + index * line_height + metrics.ascent(), font, line)
+        painter.setPen(QPen(QColor(sub["outline"]), 2 * outline, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(overlay.get("color", "#FFFFFF")))
+        painter.drawPath(path)
+
+
 def compose_preview(project_dir: Path, scene: dict, sub: dict, height: int, video_frame: Path | None = None, orientation: str = "portrait", max_width: int | None = None) -> QPixmap | None:
     """Return a pixmap of the scene as it will be framed and captioned, or None if there is no picture to show."""
     media = scene.get("media")
@@ -101,6 +141,7 @@ def compose_preview(project_dir: Path, scene: dict, sub: dict, height: int, vide
     painter = QPainter(canvas)
     painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.TextAntialiasing)
     _draw_frame(painter, source, scene.get("crop", "fill_9_16"), width, height)
+    _draw_text_overlay(painter, {**TEXT_OVERLAY_DEFAULTS, **scene.get("text_overlay", {})}, sub, width, height)
     if scene.get("show_subtitles", True):
         _draw_subtitles(painter, scene.get("dialogue", "").strip(), sub, scene.get("subtitle_pos", "bottom"), width, height)
     painter.end()

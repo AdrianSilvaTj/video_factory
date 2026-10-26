@@ -24,7 +24,7 @@ from ..channels import CHANNELS, TARGET_SECONDS, VOICES
 from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
-    CROPS, IMAGE_MOTIONS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
+    CROPS, IMAGE_MOTIONS, MUSIC_EXTENSIONS, PROJECTS_DIR, TEXT_OVERLAY_DEFAULTS, create_project, estimate_seconds, extract_frame, import_media,
     OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project,
     split_script, synthesize_voice, voice_defaults,
 )
@@ -436,6 +436,28 @@ class StudioWindow(QMainWindow):
         form.addRow("Posición de subtítulos:", self.sub_pos)
         layout.addLayout(form)
 
+        overlay = QGroupBox("Texto en imagen")
+        overlay_form = QFormLayout(overlay)
+        self.overlay_text = QPlainTextEdit()
+        self.overlay_text.setPlaceholderText("Texto que aparecerá sobre la imagen…")
+        self.overlay_text.setFixedHeight(64)
+        self.overlay_text.textChanged.connect(self._overlay_changed)
+        overlay_form.addRow("Texto:", self.overlay_text)
+        self.overlay_pos = QComboBox()
+        for label, key in (("Arriba", "top"), ("Centro", "middle"), ("Abajo", "bottom")):
+            self.overlay_pos.addItem(label, key)
+        self.overlay_pos.activated.connect(self._overlay_changed)
+        overlay_form.addRow("Posición:", self.overlay_pos)
+        self.overlay_size = QSpinBox()
+        self.overlay_size.setRange(24, 180)
+        self.overlay_size.setSuffix(" px")
+        self.overlay_size.valueChanged.connect(self._overlay_changed)
+        overlay_form.addRow("Tamaño:", self.overlay_size)
+        self.overlay_color = QPushButton("Elegir color…")
+        self.overlay_color.clicked.connect(self._choose_overlay_color)
+        overlay_form.addRow("Color:", self.overlay_color)
+        layout.addWidget(overlay)
+
         self.total = QLabel()
         layout.addWidget(self.total)
         self.render_btn = QPushButton("Renderizar video")
@@ -828,6 +850,30 @@ class StudioWindow(QMainWindow):
             self._apply_subtitle_preview()
             self._settings_changed()
 
+    def _choose_overlay_color(self):
+        overlay = self.project["scenes"][self.current].setdefault("text_overlay", dict(TEXT_OVERLAY_DEFAULTS))
+        color = QColorDialog.getColor(QColor(overlay.get("color", "#FFFFFF")), self, "Elegir color del texto")
+        if color.isValid():
+            overlay["color"] = color.name().upper()
+            self._apply_overlay_color()
+            self._changed()
+
+    def _apply_overlay_color(self):
+        color = QColor(self.project["scenes"][self.current].get("text_overlay", TEXT_OVERLAY_DEFAULTS)["color"])
+        self.overlay_color.setStyleSheet(f"background: {color.name()}; color: {'black' if color.lightness() > 128 else 'white'};")
+
+    def _overlay_changed(self, *_):
+        if self.loading or not self.project.get("scenes"):
+            return
+        scene = self.project["scenes"][self.current]
+        scene["text_overlay"] = {
+            "text": self.overlay_text.toPlainText(),
+            "position": self.overlay_pos.currentData(),
+            "size": self.overlay_size.value(),
+            "color": scene.get("text_overlay", TEXT_OVERLAY_DEFAULTS).get("color", "#FFFFFF"),
+        }
+        self._changed()
+
     # ---- scenes -----------------------------------------------------------
     def _rebuild_scenes(self):
         for card in self.cards:
@@ -914,6 +960,12 @@ class StudioWindow(QMainWindow):
         self.sub_pos.setCurrentIndex(self.sub_pos.findData(scene.get("subtitle_pos", "bottom")))
         self.sub_show.setChecked(scene.get("show_subtitles", True))
         self.sub_pos.setEnabled(self.sub_show.isChecked())
+        overlay = {**TEXT_OVERLAY_DEFAULTS, **scene.get("text_overlay", {})}
+        self.overlay_text.setPlainText(overlay["text"])
+        self.overlay_pos.setCurrentIndex(self.overlay_pos.findData(overlay["position"]))
+        self.overlay_size.setValue(int(overlay["size"]))
+        scene["text_overlay"] = overlay
+        self._apply_overlay_color()
         media = scene.get("media")
         is_image = bool(media) and media["type"] == "image"
         for widget in (self.zoom_label, self.motion_preset, self.zoom_speed):

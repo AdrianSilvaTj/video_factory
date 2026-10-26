@@ -27,11 +27,22 @@ PROJECTS_DIR = APP_ROOT / "data" / "projects"
 SCENE_PAUSE = 0.35
 EMPTY_SCENE_SECONDS = 3.0
 CROPS = {
-    "fill_9_16": "9:16 relleno",
+    "fill_9_16": "Llenar el cuadro",
     "4_3_blur": "4:3 sobre fondo difuminado",
     "fit_blur": "Completo sobre fondo difuminado",
 }
 ZOOM_SPEEDS = {"none": 0.0, "slow": 0.08, "medium": 0.16, "fast": 0.28}
+IMAGE_MOTIONS = {
+    "none": "Imagen fija",
+    "zoom_in": "Zoom suave de acercamiento",
+    "zoom_out": "Zoom suave de alejamiento",
+    "pan_up": "Paneo de abajo hacia arriba",
+    "pan_down": "Paneo de arriba hacia abajo",
+    "pan_left": "Paneo de derecha a izquierda",
+    "pan_right": "Paneo de izquierda a derecha",
+    "zoom_left": "Zoom lateral hacia la izquierda",
+    "zoom_right": "Zoom lateral hacia la derecha",
+}
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"}
 
 
@@ -48,7 +59,7 @@ def subtitle_style_line(sub: dict, name: str = "Default", alignment: int = 2, ma
 
 
 _ASS_HEADER = (
-    "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+    "[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
     "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
     "{style}\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
 )
@@ -77,7 +88,7 @@ def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ff
 
 
 def new_scene(dialogue: str = "") -> dict:
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "media": None, "crop": "fill_9_16", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "subtitle_pos": "bottom", "show_subtitles": True}
 
 
 def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
@@ -87,9 +98,9 @@ def create_project(name: str, channel: str | None = None, root: Path | None = No
     folder = (root or PROJECTS_DIR) / f"{slug(name)}-{uuid.uuid4().hex[:4]}"
     (folder / "assets").mkdir(parents=True)
     project = {
-        "schema_version": 1, "name": name, "channel": channel, "voice": CHANNELS[channel]["default_voice"], "voice_settings": voice_defaults(CHANNELS[channel]["default_voice"]),
+        "schema_version": 1, "name": name, "channel": channel, "orientation": "portrait", "voice": CHANNELS[channel]["default_voice"], "voice_settings": voice_defaults(CHANNELS[channel]["default_voice"]),
         "music": {"enabled": True, "gain": CHANNELS[channel]["music_gain"], "path": None}, "outro": CHANNELS[channel]["outro"] is not None, "outro_file": None, "outro_name": None,
-        "subtitles": dict(CHANNELS[channel]["subtitles"]), "scenes": [new_scene()], "created_at": now_iso(),
+        "subtitles": dict(CHANNELS[channel]["subtitles"]), "youtube": {"title": name, "description": "", "tags": []}, "scenes": [new_scene()], "created_at": now_iso(),
     }
     apply_channel_defaults(folder, project)
     save_json(folder / "project.json", project)
@@ -198,7 +209,18 @@ def load_project(folder: Path) -> dict:
     project.setdefault("outro_file", None)
     project.setdefault("outro_name", None)
     project.setdefault("subtitles", dict(CHANNELS[project["channel"]]["subtitles"]))
+    project.setdefault("orientation", "portrait")
+    project.setdefault("youtube", {"title": project["name"], "description": "", "tags": []})
+    project["youtube"].setdefault("title", project["name"])
+    project["youtube"].setdefault("description", "")
+    project["youtube"].setdefault("tags", [])
     project["music"].setdefault("path", None)
+    for scene in project.get("scenes", []):
+        scene.setdefault("zoom", {"speed": "slow", "direction": "in"})
+        if scene.get("motion") not in IMAGE_MOTIONS:
+            speed = scene["zoom"].get("speed", "slow")
+            direction = scene["zoom"].get("direction", "in")
+            scene["motion"] = "none" if speed == "none" else "zoom_out" if direction == "out" else "zoom_in"
     return project
 
 
@@ -290,10 +312,11 @@ def extract_frame(ffmpeg: str, media: Path, second: float, target: Path) -> Path
     return target
 
 
-def estimate_seconds(dialogue: str, fallback: float = EMPTY_SCENE_SECONDS) -> float:
+def estimate_seconds(dialogue: str, fallback: float = EMPTY_SCENE_SECONDS, extra_seconds: float = 0.0) -> float:
     """Rough scene length before the voice exists: ~2.6 spoken words per second plus the pause."""
     words = len(dialogue.split())
-    return round(words / 2.6 + SCENE_PAUSE, 1) if words else fallback
+    base = round(words / 2.6 + SCENE_PAUSE, 1) if words else fallback
+    return round(base + max(0.0, float(extra_seconds)), 1)
 
 
 def split_script(text: str) -> list[str]:
@@ -302,20 +325,22 @@ def split_script(text: str) -> list[str]:
     return [p for p in paragraphs if p]
 
 
-def _frame_graph(crop: str, k: int = 1) -> str:
-    """Filter graph that turns input 0 into a (1080k)x(1920k) frame labelled [l]."""
-    w, h = 1080 * k, 1920 * k
+def _frame_graph(crop: str, k: int = 1, orientation: str = "portrait") -> str:
+    """Filter graph that turns input 0 into a portrait or landscape frame labelled [l]."""
+    width, height = (1920, 1080) if orientation == "landscape" else (1080, 1920)
+    w, h = width * k, height * k
     blur = f"[0:v]split[bg][fg];[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},boxblur={28 * k}:{10 * k},eq=brightness=-0.18:saturation=0.78[b];"
     if crop == "4_3_blur":
-        return blur + f"[fg]scale={w}:{810 * k}:force_original_aspect_ratio=increase,crop={w}:{810 * k}[f];[b][f]overlay=0:(H-h)/2,fps=30,setsar=1[l]"
+        window_w, window_h = (1440, 1080) if orientation == "landscape" else (1080, 810)
+        return blur + f"[fg]scale={window_w * k}:{window_h * k}:force_original_aspect_ratio=increase,crop={window_w * k}:{window_h * k}[f];[b][f]overlay=(W-w)/2:(H-h)/2,fps=30,setsar=1[l]"
     if crop == "fit_blur":
         return blur + f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[f];[b][f]overlay=(W-w)/2:(H-h)/2,fps=30,setsar=1[l]"
     return f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=30,setsar=1[l]"
 
 
-def wrap_width_for(size: int) -> int:
-    """Characters per caption line so large subtitles fit inside the 1080 px frame."""
-    return max(8, int(900 / (int(size) * 0.52)))
+def wrap_width_for(size: int, width: int = 1080) -> int:
+    """Characters per caption line so subtitles fit inside the output frame."""
+    return max(8, int((width - 180) / (int(size) * 0.52)))
 
 
 def caption_chunks(text: str, max_chars: int) -> list[str]:
@@ -343,35 +368,162 @@ def _media_info(ffmpeg: str, media: Path) -> tuple[bool, float]:
     return "Audio:" in text, seconds
 
 
-def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=None, only_scene: int | None = None) -> dict:
-    """Render the project into render/video.mp4, or a quick low-resolution preview of one scene."""
+def _write_concat_list(target: Path, files: list[Path]) -> None:
+    """Write an FFmpeg concat-demuxer list, escaping paths with spaces or quotes."""
+    entries = []
+    for path in files:
+        escaped = str(path.resolve()).replace("\\", "/").replace("'", "'\\''")
+        entries.append(f"file '{escaped}'\n")
+    target.write_text("".join(entries), encoding="utf-8")
+
+
+def _chapter_timestamp(seconds: float) -> str:
+    value = max(0, int(seconds))
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def write_youtube_metadata(folder: Path, project: dict, chapters: list[tuple[float, str]], duration: float) -> Path:
+    """Write editable YouTube title, description, tags and eligible chapter markers beside the render."""
+    youtube = project.get("youtube", {})
+    title = (youtube.get("title") or project["name"]).strip()
+    description = (youtube.get("description") or "").strip()
+    tags = youtube.get("tags") or []
+    valid = []
+    for start, label in chapters:
+        if not label or (valid and start - valid[-1][0] < 10):
+            continue
+        valid.append((start, label))
+    while len(valid) > 1 and duration - valid[-1][0] < 10:
+        valid.pop()
+    chapter_text = "\n".join(f"{_chapter_timestamp(start)} {label}" for start, label in valid) if len(valid) >= 3 else "No hay suficientes capítulos elegibles. YouTube requiere al menos 3 marcas, empezando en 0:00 y con segmentos de 10 segundos o más."
+    description_with_chapters = "\n\n".join(part for part in (description, chapter_text if len(valid) >= 3 else "") if part)
+    lines = ["DATOS PARA YOUTUBE", "", "Título:", title, "", "Descripción para pegar en YouTube:", description_with_chapters or "(sin descripción)", "", "Etiquetas:", ", ".join(str(tag).strip() for tag in tags if str(tag).strip()) or "(sin etiquetas)", "", "Capítulos:", chapter_text]
+    target = folder / "youtube_metadata.txt"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def _image_motion_graph(motion: str, amount: float, width: int, height: int, frames: int) -> str:
+    """Build a smooth perspective animation; all coordinates stay inside the fitted frame."""
+    if motion in {"zoom_in", "zoom_out"}:
+        z = f"(1+{amount}*in/{frames})" if motion == "zoom_in" else f"({1 + amount}-{amount}*in/{frames})"
+        x0, y0 = f"({width}-{width}/{z})/2", f"({height}-{height}/{z})/2"
+        x1, y2 = f"{width}-{x0}", f"{height}-{y0}"
+    else:
+        z = f"(1+{amount})"
+        progress = f"(1-cos(PI*min(1,in/{max(1, frames - 1)})))/2"
+        travel_x, travel_y = f"({width}-{width}/{z})", f"({height}-{height}/{z})"
+        center_x, center_y = f"({width}-{width}/{z})/2", f"({height}-{height}/{z})/2"
+        x0, y0 = center_x, center_y
+        if motion in {"pan_right", "zoom_right"}:
+            x0 = f"{travel_x}*{progress}"
+        elif motion in {"pan_left", "zoom_left"}:
+            x0 = f"{travel_x}*(1-{progress})"
+        elif motion == "pan_down":
+            y0 = f"{travel_y}*{progress}"
+        elif motion == "pan_up":
+            y0 = f"{travel_y}*(1-{progress})"
+        x1, y2 = f"{x0}+{width}/{z}", f"{y0}+{height}/{z}"
+    return f"perspective=x0='{x0}':y0='{y0}':x1='{x1}':y1='{y0}':x2='{x0}':y2='{y2}':x3='{x1}':y3='{y2}':eval=frame:interpolation=cubic"
+
+
+def _fill_pan_graph(motion: str, amount: float, width: int, height: int, frames: int) -> str:
+    """Pan across the full overfilled still, anchoring vertical pans to its true edges."""
+    progress = f"(1-cos(PI*min(1,n/{max(1, frames - 1)})))/2"
+    # The still retains the complete image plus a restrained overscan. Cropping it
+    # dynamically means a portrait source can travel from its actual bottom/top,
+    # instead of animating inside an already center-cropped landscape frame.
+    x = "(iw-ow)/2"
+    y = "(ih-oh)/2"
+    if motion == "pan_up":
+        y = f"(ih-oh)*(1-{progress})"
+    elif motion == "pan_down":
+        y = f"(ih-oh)*{progress}"
+    elif motion in {"pan_left", "zoom_left"}:
+        x = f"(iw-ow)*(1-{progress})"
+    elif motion in {"pan_right", "zoom_right"}:
+        x = f"(iw-ow)*{progress}"
+    return f"crop={width}:{height}:x='{x}':y='{y}':exact=1,fps=30,scale={width // 2}:{height // 2}:flags=lanczos,setsar=1"
+
+
+def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=None, only_scene: int | None = None, only_scenes: list[int] | None = None, force_preview: bool = False) -> dict:
+    """Render the project into render/video.mp4, or a quick low-resolution scene preview."""
     project = load_project(folder)
-    preview = only_scene is not None
-    scenes = [project["scenes"][only_scene]] if preview else project["scenes"]
+    preview = only_scene is not None or only_scenes is not None
+    indices = only_scenes if only_scenes is not None else [only_scene] if only_scene is not None else None
+    if indices is not None and any(index < 0 or index >= len(project["scenes"]) for index in indices):
+        raise IndexError("Una de las escenas solicitadas para la vista previa no existe.")
+    scenes = [project["scenes"][index] for index in indices] if indices is not None else project["scenes"]
     if not scenes:
         raise ValueError("El proyecto no tiene escenas.")
-    channel = CHANNELS[project["channel"]]
-    preset = VOICES[project["voice"]]
-    ffmpeg = ffmpeg_explicit or _find_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError("No encuentro FFmpeg; instálalo o agrégalo al PATH.")
     for number, scene in enumerate(scenes, start=1):
         if not scene.get("media") or not (folder / scene["media"]["path"]).is_file():
             raise FileNotFoundError(f"La escena {number} no tiene un recurso visual válido.")
+
+    channel = CHANNELS[project["channel"]]
+    preview_cache = None
+    if preview:
+        asset_paths = [folder / scene["media"]["path"] for scene in scenes]
+        music_ref = project["music"].get("path")
+        music_path = resolve_asset(folder, music_ref) if music_ref else channel["music"]
+        if music_path:
+            asset_paths.append(Path(music_path))
+        assets = []
+        for path in asset_paths:
+            try:
+                stat = path.stat()
+                assets.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                assets.append((str(path), None, None))
+        cache_data = {
+            "version": 1,
+            "orientation": project.get("orientation", "portrait"),
+            "voice": project["voice"],
+            "voice_settings": project["voice_settings"],
+            "subtitles": project["subtitles"],
+            "music": project["music"],
+            "scenes": scenes,
+            "assets": assets,
+        }
+        cache_key = hashlib.sha256(json.dumps(cache_data, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        cache_dir = folder / "render" / "preview" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        preview_cache = cache_dir / f"{cache_key}.mp4"
+        if preview_cache.is_file() and preview_cache.stat().st_size and not force_preview:
+            return {"status": "preview", "output": str(preview_cache), "duration_seconds": None, "cache_hit": True}
+
+    ffmpeg = ffmpeg_explicit or _find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("No encuentro FFmpeg; instálalo o agrégalo al PATH.")
+    preset = VOICES[project["voice"]]
     if any(s["dialogue"].strip() for s in scenes) and not EDGE_TTS_PACKAGES.is_dir():
         raise RuntimeError(f"Falta edge-tts en {EDGE_TTS_PACKAGES}.")
 
     out_dir = folder / "render" / "preview" if preview else folder / "render"
-    (out_dir / "scenes").mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work_dir = out_dir / f".work-{uuid.uuid4().hex[:8]}"
+    (work_dir / "scenes").mkdir(parents=True)
     (folder / "voice").mkdir(exist_ok=True)
     sub = project["subtitles"]
-    style_line = "\n".join([subtitle_style_line(sub), subtitle_style_line(sub, "Middle", 5, 0), subtitle_style_line(sub, "Top", 8, 260)])
-    wrap_width = wrap_width_for(project["subtitles"]["size"])
+    orientation = project.get("orientation", "portrait")
+    frame_width, frame_height = (1920, 1080) if orientation == "landscape" else (1080, 1920)
+    subtitle_settings = dict(sub)
+    if orientation == "landscape":
+        subtitle_settings["size"] = round(int(sub["size"]) * 0.72)
+        subtitle_settings["margin_v"] = 120
+    style_line = "\n".join([subtitle_style_line(subtitle_settings), subtitle_style_line(subtitle_settings, "Middle", 5, 0), subtitle_style_line(subtitle_settings, "Top", 8, 146 if orientation == "landscape" else 260)])
+    wrap_width = wrap_width_for(subtitle_settings["size"], frame_width)
     k = 1 if preview else 2
-    ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(style=style_line)], [], [], [], 0.0
+    ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(width=frame_width, height=frame_height, style=style_line)], [], [], [], 0.0
+    chapter_starts = [(0.0, (project.get("youtube", {}).get("title") or project["name"]).strip())]
     for number, scene in enumerate(scenes, start=1):
         if progress:
             progress(number, len(scenes))
+        chapter = (scene.get("chapter") or "").strip().replace("\n", " ")
+        if chapter:
+            chapter_starts.append((cursor, chapter))
         dialogue = scene["dialogue"].strip()
         if dialogue:
             try:
@@ -379,38 +531,55 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             except RuntimeError as exc:
                 raise RuntimeError(f"Escena {number}: {exc}") from exc
             with wave.open(str(wav), "rb") as audio:
-                length = audio.getnframes() / audio.getframerate() + SCENE_PAUSE
+                length = audio.getnframes() / audio.getframerate() + SCENE_PAUSE + max(0.0, float(scene.get("extra_seconds", 0)))
             audio_input = ["-i", str(wav)]
         else:
-            length = float(scene.get("duration") or EMPTY_SCENE_SECONDS)
+            length = float(scene.get("duration") or EMPTY_SCENE_SECONDS) + max(0.0, float(scene.get("extra_seconds", 0)))
             audio_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
-        audio_out = out_dir / "scenes" / f"scene-{number:02d}.wav"
-        proc = run([ffmpeg, "-y", *audio_input, "-af", f"{_AUDIO_FMT},apad=whole_dur={length:.4f}", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=120)
+        audio_out = work_dir / "scenes" / f"scene-{number:04d}.wav"
+        proc = run([ffmpeg, "-y", *audio_input, "-af", f"{_AUDIO_FMT},apad=whole_dur={length:.4f}", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=max(120, int(length * 10)))
         if proc.returncode or not audio_out.is_file():
             raise RuntimeError(f"Falló el audio de la escena {number}: {proc.stderr[-800:]}")
         scene_audios.append(audio_out)
 
         media = folder / scene["media"]["path"]
         is_image = scene["media"].get("type") == "image"
-        speed = ZOOM_SPEEDS[scene["zoom"]["speed"]]
-        if is_image and speed:
+        motion = scene.get("motion")
+        if motion not in IMAGE_MOTIONS:
+            motion = "none" if scene["zoom"].get("speed") == "none" else "zoom_out" if scene["zoom"].get("direction") == "out" else "zoom_in"
+        speed = ZOOM_SPEEDS.get(scene["zoom"].get("speed", "slow"), ZOOM_SPEEDS["slow"])
+        if is_image and motion != "none" and speed:
             # perspective interpolates at sub-pixel positions; zoompan rounds to whole pixels and shakes.
             frames = max(1, round(length * 30))
-            z = f"(1+{speed}*in/{frames})" if scene["zoom"]["direction"] == "in" else f"({1 + speed}-{speed}*in/{frames})"
-            x0, y0 = f"({1080 * k}-{1080 * k}/{z})/2", f"({1920 * k}-{1920 * k}/{z})/2"
-            x1, y2 = f"{1080 * k}-{x0}", f"{1920 * k}-{y0}"
-            # Fit the photo once into a 2x frame; the zoom then only resamples that small still.
-            fitted = out_dir / "scenes" / f"scene-{number:02d}-frame.png"
-            proc = run([ffmpeg, "-y", "-i", str(media), "-filter_complex", _frame_graph(scene["crop"], k).replace("fps=30,", "") .replace("[l]", "[o]"), "-map", "[o]", "-frames:v", "1", str(fitted)], capture_output=True, text=True, timeout=300)
+            motion_k = max(k, 2) if scene["crop"] == "fill_9_16" and motion.startswith("pan_") else k
+            motion_w, motion_h = frame_width * motion_k, frame_height * motion_k
+            fitted = work_dir / "scenes" / f"scene-{number:04d}-frame.png"
+            if scene["crop"] == "fill_9_16" and motion.startswith("pan_"):
+                # Keep all source content at the output width. The animated crop
+                # later moves through the true overfill (e.g. portrait top to bottom).
+                overscan = 1 + speed
+                if orientation == "landscape" and motion in {"pan_up", "pan_down"}:
+                    prepare_graph = f"[0:v]scale={motion_w}:-2:flags=lanczos,scale='ceil(iw*{overscan}/2)*2':'ceil(ih*{overscan}/2)*2':flags=lanczos,setsar=1[o]"
+                else:
+                    prepare_graph = f"[0:v]scale='ceil(iw*min({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':'ceil(ih*min({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':flags=lanczos,setsar=1[o]"
+                motion_graph = _fill_pan_graph(motion, speed, motion_w, motion_h, frames)
+            else:
+                # Fit the photo once into the frame; the zoom then only resamples that small still.
+                prepare_graph = _frame_graph(scene["crop"], k, orientation).replace("fps=30,", "").replace("[l]", "[o]")
+                motion_graph = _image_motion_graph(motion, speed, frame_width * k, frame_height * k, frames)
+            proc = run([ffmpeg, "-y", "-i", str(media), "-filter_complex", prepare_graph, "-map", "[o]", "-frames:v", "1", str(fitted)], capture_output=True, text=True, timeout=300)
             if proc.returncode or not fitted.is_file():
                 raise RuntimeError(f"No se pudo preparar la imagen de la escena {number}: {proc.stderr[-800:]}")
             media = fitted
-            graph = f"[0:v]perspective=x0='{x0}':y0='{y0}':x1='{x1}':y1='{y0}':x2='{x0}':y2='{y2}':x3='{x1}':y3='{y2}':eval=frame:interpolation=cubic,scale=1080:1920:flags=lanczos,setsar=1[v]"
+            if scene["crop"] == "fill_9_16" and motion.startswith("pan_"):
+                graph = f"[0:v]{motion_graph}[v]"
+            else:
+                graph = f"[0:v]{motion_graph},scale={frame_width}:{frame_height}:flags=lanczos,setsar=1[v]"
         else:
-            graph = _frame_graph(scene["crop"]) + ";[l]null[v]"
+            graph = _frame_graph(scene["crop"], orientation=orientation) + ";[l]null[v]"
         input_args = ["-loop", "1", "-framerate", "30", "-i", str(media)] if is_image else ["-stream_loop", "-1", "-ss", f"{float(scene.get('start') or 0):.3f}", "-i", str(media)]
-        video_out = out_dir / "scenes" / f"scene-{number:02d}.mp4"
-        proc = run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=300)
+        video_out = work_dir / "scenes" / f"scene-{number:04d}.mp4"
+        proc = run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=max(300, int(length * 60)))
         if proc.returncode or not video_out.is_file():
             raise RuntimeError(f"Falló el video de la escena {number}: {proc.stderr[-1200:]}")
         scene_videos.append(video_out)
@@ -427,20 +596,31 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         cursor += length
         records.append({"scene": number, "seconds": round(length, 2), "media": scene["media"]["path"], "crop": scene["crop"], "zoom": scene["zoom"] if is_image else None})
 
-    ass = out_dir / "captions.ass"
+    total = cursor
+    if progress:
+        progress(0, len(scenes))
+    video_list = work_dir / "video-concat.txt"
+    audio_list = work_dir / "audio-concat.txt"
+    _write_concat_list(video_list, scene_videos)
+    _write_concat_list(audio_list, scene_audios)
+    joined_video = work_dir / "joined-video.mp4"
+    proc = run([ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(video_list), "-c", "copy", str(joined_video)], capture_output=True, text=True, timeout=max(600, int(total * 5)))
+    if proc.returncode or not joined_video.is_file() or joined_video.stat().st_size == 0:
+        raise RuntimeError(f"No se pudieron concatenar las escenas de video: {proc.stderr[-1200:]}")
+    for video in scene_videos:
+        video.unlink(missing_ok=True)
+
+    ass = work_dir / "captions.ass"
     ass.write_text("".join(ass_lines), encoding="utf-8-sig")
     ass_filter = str(ass.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
-    total = cursor
     music = resolve_asset(folder, project["music"]["path"]) if project["music"]["path"] else channel["music"]
     outro = resolve_asset(folder, project["outro_file"]) if project["outro_file"] else channel["outro"]
     use_music = bool(project["music"]["enabled"] and music and music.is_file())
     use_outro = bool(not preview and project["outro"] and outro and outro.is_file())
-    cmd = [ffmpeg, "-y"]
-    for f in scene_videos + scene_audios:
-        cmd += ["-i", str(f)]
-    n = len(scenes)
-    graph = ["".join(f"[{i}:v]" for i in range(n)) + f"concat=n={n}:v=1:a=0,subtitles='{ass_filter}'{',scale=540:960' if preview else ''}[main_video]", "".join(f"[{n + i}:a]" for i in range(n)) + f"concat=n={n}:v=0:a=1[voice]"]
-    next_input = 2 * n
+    cmd = [ffmpeg, "-y", "-i", str(joined_video), "-f", "concat", "-safe", "0", "-i", str(audio_list)]
+    preview_scale = ",scale=960:540" if orientation == "landscape" else ",scale=540:960"
+    graph = [f"[0:v:0]tpad=stop_mode=clone:stop_duration=1,trim=duration={total:.6f},setpts=PTS-STARTPTS,subtitles='{ass_filter}'{preview_scale if preview else ''}[main_video]", f"[1:a:0]apad=pad_dur=1,atrim=duration={total:.6f},asetpts=PTS-STARTPTS[voice]"]
+    next_input = 2
     if use_music:
         cmd += ["-stream_loop", "-1", "-i", str(music)]
         graph += [f"[{next_input}:a:0]atrim=duration={total:.6f},asetpts=PTS-STARTPTS,{_AUDIO_FMT},volume={project['music']['gain']},afade=t=out:st={max(0.0, total - 3):.3f}:d=3[bed]", "[voice][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[main_audio]"]
@@ -451,31 +631,36 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         cmd += ["-i", str(outro)]
         has_audio, outro_seconds = _media_info(ffmpeg, outro)
         outro_audio = f"[{next_input}:a:0]{_AUDIO_FMT}[outro_a]" if has_audio else f"anullsrc=r=48000:cl=stereo:d={outro_seconds:.3f},{_AUDIO_FMT}[outro_a]"
-        graph += [f"[{next_input}:v:0]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1[outro_v]", outro_audio, "[main_video][outro_v]concat=n=2:v=1:a=0[final_video]", "[main_audio][outro_a]concat=n=2:v=0:a=1[final_audio]"]
+        graph += [f"[{next_input}:v:0]scale={frame_width}:{frame_height}:force_original_aspect_ratio=increase,crop={frame_width}:{frame_height},fps=30,setsar=1[outro_v]", outro_audio, "[main_video][outro_v]concat=n=2:v=1:a=0[final_video]", "[main_audio][outro_a]concat=n=2:v=0:a=1[final_audio]"]
         maps = ["-map", "[final_video]", "-map", "[final_audio]"]
     else:
         maps = ["-map", "[main_video]", "-map", "[main_audio]"]
-    output = out_dir / ("scene.mp4" if preview else "video.mp4")
+    output = preview_cache if preview else out_dir / "video.mp4"
     partial = output.with_name(output.stem + ".part.mp4")
     cmd += ["-filter_complex", ";".join(graph), *maps, "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-b:v", "2M" if preview else "8M", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(partial)]
     try:
-        proc = run(cmd, capture_output=True, text=True, timeout=1800)
+        proc = run(cmd, capture_output=True, text=True, timeout=max(1800, int(total * 30)))
         if proc.returncode or not partial.is_file():
             raise RuntimeError("Falló el render final: " + proc.stderr[-3000:])
         os.replace(partial, output)
     finally:
         partial.unlink(missing_ok=True)
     if preview:
-        return {"status": "preview", "output": str(output), "duration_seconds": round(total, 2)}
+        shutil.copy2(ass, out_dir / "captions.ass")
+        shutil.rmtree(work_dir, ignore_errors=True)
+        return {"status": "preview", "output": str(output), "duration_seconds": round(total, 2), "cache_hit": False}
 
     shutil.copy2(write_credits(folder, project), out_dir / "creditos.txt")
+    shutil.copy2(ass, out_dir / "captions.ass")
+    metadata = write_youtube_metadata(out_dir, project, chapter_starts, total)
     warnings = []
-    if abs(total - TARGET_SECONDS) > 5:
+    if orientation == "portrait" and abs(total - TARGET_SECONDS) > 5:
         warnings.append(f"La duración del guion ({total:.1f} s) se aleja del objetivo de {TARGET_SECONDS} s.")
     if project["music"]["enabled"] and not use_music:
         warnings.append(f"Sin música de fondo: no existe {music}.")
     if project["outro"] and not use_outro:
         warnings.append(f"Sin outro: no existe {outro}.")
-    report = {"status": "rendered", "output": str(output), "duration_seconds": round(total, 2), "target_seconds": TARGET_SECONDS, "scenes": records, "warnings": warnings, "rendered_at": now_iso()}
+    report = {"status": "rendered", "output": str(output), "youtube_metadata": str(metadata), "orientation": orientation, "resolution": f"{frame_width}x{frame_height}", "duration_seconds": round(total, 2), "target_seconds": TARGET_SECONDS, "scenes": records, "warnings": warnings, "rendered_at": now_iso()}
     save_json(out_dir / "render.json", report)
+    shutil.rmtree(work_dir, ignore_errors=True)
     return report

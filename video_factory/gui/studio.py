@@ -15,7 +15,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout,
-    QFrame, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
+    QDialog, QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget,
     QVBoxLayout, QWidget,
 )
@@ -24,7 +24,7 @@ from ..channels import CHANNELS, TARGET_SECONDS, VOICES
 from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
-    CROPS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
+    CROPS, IMAGE_MOTIONS, MUSIC_EXTENSIONS, PROJECTS_DIR, create_project, estimate_seconds, extract_frame, import_media,
     OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project,
     split_script, synthesize_voice, voice_defaults,
 )
@@ -33,7 +33,7 @@ from .frame_preview import compose_preview
 from .media_dialog import MediaDialog
 from .workers import run_task
 
-ZOOM_LABELS = {"none": "Sin zoom", "slow": "Zoom lento", "medium": "Zoom medio", "fast": "Zoom rápido"}
+ZOOM_LABELS = {"none": "—", "slow": "Sutil", "medium": "Moderado", "fast": "Amplio"}
 
 
 class SceneCard(QFrame):
@@ -45,8 +45,9 @@ class SceneCard(QFrame):
     move_requested = Signal(int, int)
     delete_requested = Signal(int)
     enter_pressed = Signal(int, str, int)
+    preview_toggled = Signal(str, bool)
 
-    def __init__(self, index: int, scene: dict, project_dir: Path):
+    def __init__(self, index: int, scene: dict, project_dir: Path, preview_selected: bool = False):
         super().__init__()
         self.index, self.scene, self.project_dir = index, scene, project_dir
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -55,6 +56,11 @@ class SceneCard(QFrame):
         head = QHBoxLayout()
         self.title = QLabel()
         head.addWidget(self.title, 1)
+        self.preview_check = QCheckBox("Vista previa")
+        self.preview_check.setToolTip("Incluir esta escena en la vista previa consecutiva")
+        self.preview_check.setChecked(preview_selected)
+        self.preview_check.toggled.connect(lambda checked: self.preview_toggled.emit(scene["id"], checked))
+        head.addWidget(self.preview_check)
         for text, tip, slot in (("↑", "Subir", lambda: self.move_requested.emit(index, -1)), ("↓", "Bajar", lambda: self.move_requested.emit(index, 1)), ("✕", "Eliminar escena", lambda: self.delete_requested.emit(index))):
             button = QPushButton(text)
             button.setToolTip(tip)
@@ -62,6 +68,24 @@ class SceneCard(QFrame):
             button.clicked.connect(slot)
             head.addWidget(button)
         layout.addLayout(head)
+        self.chapter = QLineEdit(scene.get("chapter", ""))
+        self.chapter.setPlaceholderText("Título del capítulo para YouTube (opcional)")
+        self.chapter.setMaxLength(100)
+        self.chapter.textChanged.connect(self._chapter_changed)
+        layout.addWidget(self.chapter)
+        extra_row = QHBoxLayout()
+        extra_row.addWidget(QLabel("Tiempo extra:"))
+        self.extra_seconds = QDoubleSpinBox()
+        self.extra_seconds.setRange(0, 600)
+        self.extra_seconds.setDecimals(1)
+        self.extra_seconds.setSingleStep(0.5)
+        self.extra_seconds.setSuffix(" s")
+        self.extra_seconds.setValue(float(scene.get("extra_seconds", 0)))
+        self.extra_seconds.setToolTip("Segundos adicionales después de la narración de esta escena")
+        self.extra_seconds.valueChanged.connect(self._extra_changed)
+        extra_row.addWidget(self.extra_seconds)
+        extra_row.addStretch(1)
+        layout.addLayout(extra_row)
         body = QHBoxLayout()
         self.text = QPlainTextEdit(scene["dialogue"])
         self.text.setPlaceholderText("Diálogo de la escena…")
@@ -78,7 +102,7 @@ class SceneCard(QFrame):
         self.refresh()
 
     def refresh(self):
-        self.title.setText(f"Escena {self.index + 1} · ~{estimate_seconds(self.text.toPlainText(), self.scene.get('duration', 3.0)):.1f} s")
+        self.title.setText(f"Escena {self.index + 1} · ~{estimate_seconds(self.text.toPlainText(), self.scene.get('duration', 3.0), self.scene.get('extra_seconds', 0)):.1f} s")
         media = self.scene.get("media")
         source = media and (media.get("thumb") or (media["path"] if media["type"] == "image" else None))
         pixmap = QPixmap(str(self.project_dir / source)) if source else QPixmap()
@@ -95,6 +119,15 @@ class SceneCard(QFrame):
 
     def _text_changed(self):
         self.scene["dialogue"] = self.text.toPlainText()
+        self.refresh()
+        self.edited.emit()
+
+    def _chapter_changed(self, value: str):
+        self.scene["chapter"] = value
+        self.edited.emit()
+
+    def _extra_changed(self, value: float):
+        self.scene["extra_seconds"] = value
         self.refresh()
         self.edited.emit()
 
@@ -124,6 +157,8 @@ class StudioWindow(QMainWindow):
         self.project: dict = {}
         self.current = 0
         self.cards: list[SceneCard] = []
+        self.preview_scene_ids: set[str] = set()
+        self.preview_indices: list[int] = []
         self.loading = False
         self.setWindowTitle("Video Factory")
         self.resize(1360, 820)
@@ -160,10 +195,18 @@ class StudioWindow(QMainWindow):
         new_btn = QPushButton("Nuevo proyecto…")
         new_btn.clicked.connect(self.new_project)
         form.addRow(new_btn)
+        youtube_btn = QPushButton("Datos para YouTube…")
+        youtube_btn.clicked.connect(self.edit_youtube_metadata)
+        form.addRow(youtube_btn)
         layout.addWidget(box)
 
         options = QGroupBox("Opciones generales")
         form = QFormLayout(options)
+        self.orientation = QComboBox()
+        self.orientation.addItem("Vertical · 9:16", "portrait")
+        self.orientation.addItem("Horizontal · 16:9", "landscape")
+        self.orientation.activated.connect(self._orientation_changed)
+        form.addRow("Formato:", self.orientation)
         self.channel = QComboBox()
         for key, preset in CHANNELS.items():
             self.channel.addItem(preset["label"], key)
@@ -308,7 +351,7 @@ class StudioWindow(QMainWindow):
         layout.addWidget(self.detail_title)
         self.preview = QLabel("Sin recurso visual")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setMinimumSize(120, 380)
+        self.preview.setMinimumSize(120, 120)
         self.preview.setStyleSheet("background: #111; color: #bbb; border-radius: 8px;")
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video = QVideoWidget()
@@ -346,9 +389,13 @@ class StudioWindow(QMainWindow):
         pick.clicked.connect(lambda: self.pick_media(self.current))
         buttons.addWidget(pick)
         self.preview_btn = QPushButton("▶ Vista previa de la escena")
-        self.preview_btn.setToolTip("Genera un video de baja resolución de esta escena con su voz, encuadre, zoom y subtítulos")
+        self.preview_btn.setToolTip("Marca varias escenas consecutivas para generar su vista previa en orden")
         self.preview_btn.clicked.connect(self.preview_scene)
         buttons.addWidget(self.preview_btn)
+        self.force_preview_btn = QPushButton("↻ Volver a renderizar")
+        self.force_preview_btn.setToolTip("Ignora la vista previa guardada y genera una nueva")
+        self.force_preview_btn.clicked.connect(lambda: self.preview_scene(force=True))
+        buttons.addWidget(self.force_preview_btn)
         layout.addLayout(buttons)
         form = QFormLayout()
         self.crop = QComboBox()
@@ -356,19 +403,22 @@ class StudioWindow(QMainWindow):
             self.crop.addItem(label, key)
         self.crop.activated.connect(self._scene_options_changed)
         form.addRow("Encuadre:", self.crop)
-        zoom_row = QHBoxLayout()
+        motion_row = QHBoxLayout()
+        self.motion_preset = QComboBox()
+        for key, label in IMAGE_MOTIONS.items():
+            self.motion_preset.addItem(label, key)
+        self.motion_preset.setToolTip("Movimiento lento y continuo. La vista fija no lo anima; usa Vista previa de la escena para verlo.")
+        self.motion_preset.activated.connect(self._scene_options_changed)
+        motion_row.addWidget(self.motion_preset, 2)
         self.zoom_speed = QComboBox()
         for key, label in ZOOM_LABELS.items():
             self.zoom_speed.addItem(label, key)
+        self.zoom_speed.setToolTip("Controla cuánto se acerca o cuánto recorre el paneo.")
         self.zoom_speed.activated.connect(self._scene_options_changed)
-        zoom_row.addWidget(self.zoom_speed)
-        self.zoom_direction = QComboBox()
-        self.zoom_direction.addItem("Acercar", "in")
-        self.zoom_direction.addItem("Alejar", "out")
-        self.zoom_direction.activated.connect(self._scene_options_changed)
-        zoom_row.addWidget(self.zoom_direction)
-        self.zoom_label = QLabel("Zoom (imágenes):")
-        form.addRow(self.zoom_label, zoom_row)
+        motion_row.addWidget(QLabel("Intensidad:"))
+        motion_row.addWidget(self.zoom_speed, 1)
+        self.zoom_label = QLabel("Movimiento (imágenes):")
+        form.addRow(self.zoom_label, motion_row)
         self.start = QDoubleSpinBox()
         self.start.setRange(0, 3600)
         self.start.setSuffix(" s")
@@ -475,10 +525,14 @@ class StudioWindow(QMainWindow):
         self.loading = True
         self.folder, self.project = folder, load_project(folder)
         self.current = 0
+        self.preview_scene_ids.clear()
+        self.preview_indices = []
+        self.preview_btn.setText("▶ Vista previa de la escena")
         self.project_combo.clear()
         for path in self._project_dirs():
             self.project_combo.addItem(path.name, path)
         self.project_combo.setCurrentIndex(max(0, self.project_combo.findData(folder)))
+        self.orientation.setCurrentIndex(self.orientation.findData(self.project.get("orientation", "portrait")))
         self.channel.setCurrentIndex(self.channel.findData(self.project["channel"]))
         self.voice.setCurrentIndex(self.voice.findData(self.project["voice"]))
         self.music.setChecked(self.project["music"]["enabled"])
@@ -549,6 +603,45 @@ class StudioWindow(QMainWindow):
         return False
 
     # ---- general options --------------------------------------------------
+    def edit_youtube_metadata(self):
+        data = self.project.setdefault("youtube", {"title": self.project["name"], "description": "", "tags": []})
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Datos para YouTube")
+        dialog.resize(520, 430)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        title = QLineEdit(data.get("title") or self.project["name"])
+        title.setMaxLength(100)
+        form.addRow("Título (máx. 100):", title)
+        description = QPlainTextEdit(data.get("description", ""))
+        description.setPlaceholderText("Descripción del video…")
+        description.setMinimumHeight(190)
+        form.addRow("Descripción:", description)
+        tags = QLineEdit(", ".join(data.get("tags") or []))
+        tags.setPlaceholderText("curiosidades, naturaleza, historia")
+        form.addRow("Etiquetas (separadas por coma):", tags)
+        layout.addLayout(form)
+        note = QLabel("Al terminar el render se guardará youtube_metadata.txt junto al video, con capítulos cuando cumplan los requisitos de YouTube.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        description_text = description.toPlainText().strip()
+        if len(description_text.encode("utf-8")) > 5000:
+            QMessageBox.warning(self, "Descripción demasiado larga", "YouTube admite hasta 5.000 bytes en la descripción.")
+            return
+        tag_list = [part.strip() for part in tags.text().split(",") if part.strip()]
+        tag_size = sum(len(tag) + (2 if " " in tag else 0) for tag in tag_list) + max(0, len(tag_list) - 1)
+        if tag_size > 500:
+            QMessageBox.warning(self, "Etiquetas demasiado largas", "Las etiquetas superan el límite total de 500 caracteres.")
+            return
+        data.update({"title": title.text().strip() or self.project["name"], "description": description_text, "tags": tag_list})
+        self._changed()
+
     def _options_changed(self, *_):
         if self.loading:
             return
@@ -556,6 +649,14 @@ class StudioWindow(QMainWindow):
         self.project["music"].update({"enabled": self.music.isChecked(), "gain": self.gain.value() / 100})
         self.music_audio.setVolume(self.project["music"]["gain"])
         self._settings_changed()
+
+    def _orientation_changed(self, *_):
+        if self.loading:
+            return
+        self.project["orientation"] = self.orientation.currentData()
+        self._update_total()
+        self._refresh_frame()
+        self._changed()
 
     def _channel_changed(self, *_):
         """Switch channel: use the settings last saved for it, or the channel's presets the first time."""
@@ -733,9 +834,12 @@ class StudioWindow(QMainWindow):
             card.setParent(None)
             card.deleteLater()
         self.cards = []
+        valid_ids = {scene["id"] for scene in self.project["scenes"]}
+        self.preview_scene_ids.intersection_update(valid_ids)
         for index, scene in enumerate(self.project["scenes"]):
-            card = SceneCard(index, scene, self.folder)
+            card = SceneCard(index, scene, self.folder, scene["id"] in self.preview_scene_ids)
             card.selected.connect(self.select_scene)
+            card.preview_toggled.connect(self._preview_scene_toggled)
             card.edited.connect(self._scene_text_edited)
             card.enter_pressed.connect(self.split_scene_at_enter)
             card.media_requested.connect(self.pick_media)
@@ -746,6 +850,14 @@ class StudioWindow(QMainWindow):
         self.current = min(self.current, len(self.cards) - 1)
         self.select_scene(self.current)
 
+    def _preview_scene_toggled(self, scene_id: str, checked: bool):
+        if checked:
+            self.preview_scene_ids.add(scene_id)
+        else:
+            self.preview_scene_ids.discard(scene_id)
+        selected_count = len(self.preview_scene_ids)
+        self.preview_btn.setText("▶ Vista previa de escenas" if selected_count else "▶ Vista previa de la escena")
+
     def _refresh_frame(self):
         """Draw the current scene's framing and subtitles in the preview area (skipped while a video preview plays)."""
         if not self.project.get("scenes") or self.stack.currentIndex() != 0:
@@ -753,7 +865,7 @@ class StudioWindow(QMainWindow):
         scene = self.project["scenes"][self.current]
         media = scene.get("media")
         frame = self._video_frame(scene) if media and media.get("type") == "video" else None
-        pixmap = compose_preview(self.folder, scene, self.project["subtitles"], max(300, self.preview.height() - 8), frame)
+        pixmap = compose_preview(self.folder, scene, self.project["subtitles"], max(120, self.preview.height() - 8), frame, self.project.get("orientation", "portrait"), max_width=max(120, self.preview.width() - 8))
         if pixmap is None:
             self.preview.setPixmap(QPixmap())
             self.preview.setText("Sin recurso visual" if not scene.get("media") else "Video (sin miniatura)")
@@ -796,15 +908,15 @@ class StudioWindow(QMainWindow):
         self.loading = True
         self.detail_title.setText(f"Escena {index + 1}")
         self.crop.setCurrentIndex(self.crop.findData(scene["crop"]))
-        self.zoom_speed.setCurrentIndex(self.zoom_speed.findData(scene["zoom"]["speed"]))
-        self.zoom_direction.setCurrentIndex(self.zoom_direction.findData(scene["zoom"]["direction"]))
+        self.motion_preset.setCurrentIndex(self.motion_preset.findData(scene.get("motion", "zoom_in")))
+        self.zoom_speed.setCurrentIndex(self.zoom_speed.findData(scene["zoom"].get("speed", "slow")))
         self.start.setValue(float(scene.get("start") or 0))
         self.sub_pos.setCurrentIndex(self.sub_pos.findData(scene.get("subtitle_pos", "bottom")))
         self.sub_show.setChecked(scene.get("show_subtitles", True))
         self.sub_pos.setEnabled(self.sub_show.isChecked())
         media = scene.get("media")
         is_image = bool(media) and media["type"] == "image"
-        for widget in (self.zoom_label, self.zoom_speed, self.zoom_direction):
+        for widget in (self.zoom_label, self.motion_preset, self.zoom_speed):
             widget.setEnabled(is_image)
         for widget in (self.start_label, self.start):
             widget.setEnabled(bool(media) and not is_image)
@@ -817,7 +929,13 @@ class StudioWindow(QMainWindow):
             return
         scene = self.project["scenes"][self.current]
         scene["crop"] = self.crop.currentData()
-        scene["zoom"] = {"speed": self.zoom_speed.currentData(), "direction": self.zoom_direction.currentData()}
+        scene["motion"] = self.motion_preset.currentData()
+        speed = self.zoom_speed.currentData()
+        if scene["motion"] != "none" and speed == "none":
+            speed = "slow"
+            self.zoom_speed.setCurrentIndex(self.zoom_speed.findData(speed))
+        direction = "out" if scene["motion"] == "zoom_out" else "in" if scene["motion"] == "zoom_in" else scene["zoom"].get("direction", "in")
+        scene["zoom"] = {"speed": speed, "direction": direction}
         scene["start"] = self.start.value()
         scene["subtitle_pos"] = self.sub_pos.currentData()
         scene["show_subtitles"] = self.sub_show.isChecked()
@@ -825,9 +943,12 @@ class StudioWindow(QMainWindow):
         self._changed()
 
     def _update_total(self):
-        total = sum(estimate_seconds(s["dialogue"], s.get("duration", 3.0)) for s in self.project["scenes"])
-        color = "#2e7d32" if abs(total - TARGET_SECONDS) <= 5 else "#c77700"
-        self.total.setText(f"<b>Duración estimada: ~{total:.0f} s</b> <span style='color:{color}'>(objetivo {TARGET_SECONDS} s; la real depende de la voz)</span>")
+        total = sum(estimate_seconds(s["dialogue"], s.get("duration", 3.0), s.get("extra_seconds", 0)) for s in self.project["scenes"])
+        if self.project.get("orientation", "portrait") == "landscape":
+            self.total.setText(f"<b>Duración estimada: ~{total:.0f} s</b> <span>(la duración real depende de la voz)</span>")
+        else:
+            color = "#2e7d32" if abs(total - TARGET_SECONDS) <= 5 else "#c77700"
+            self.total.setText(f"<b>Duración estimada: ~{total:.0f} s</b> <span style='color:{color}'>(objetivo {TARGET_SECONDS} s; la real depende de la voz)</span>")
 
     def add_scene(self):
         index = self.current + 1
@@ -905,23 +1026,38 @@ class StudioWindow(QMainWindow):
         self.stack.setCurrentIndex(0)
         self.controls.setVisible(False)
 
-    def preview_scene(self):
-        index = self.current
-        if not self.project["scenes"][index].get("media"):
-            QMessageBox.information(self, "Falta el recurso", "Elige primero una imagen o video para esta escena.")
+    def preview_scene(self, force: bool = False):
+        indices = [i for i, scene in enumerate(self.project["scenes"]) if scene["id"] in self.preview_scene_ids]
+        if not indices:
+            indices = [self.current]
+        if indices != list(range(indices[0], indices[-1] + 1)):
+            QMessageBox.information(self, "Selección no consecutiva", "Para crear una vista previa seguida, marca escenas consecutivas sin dejar escenas intermedias sin marcar.")
+            return
+        missing = [i + 1 for i in indices if not self.project["scenes"][i].get("media")]
+        if missing:
+            QMessageBox.information(self, "Falta el recurso", f"Elige primero una imagen o video para la escena {', '.join(map(str, missing))}.")
             return
         self._save_now()
         self._stop_preview()
         folder = self.folder
-        self.preview_index = index
+        self.preview_indices = indices
         self._set_busy(True)
-        self._say("Generando la vista previa de la escena (la primera vez sintetiza la voz)…")
-        run_task(self, lambda: render_project(folder, only_scene=index), self._preview_ready, self._preview_failed)
+        target = "escenas" if len(indices) > 1 else "escena"
+        message = "Volviendo a renderizar" if force else "Preparando"
+        self._say(f"{message} vista previa de {target} (la primera vez sintetiza las voces)…")
+        run_task(self, lambda: render_project(folder, only_scenes=indices, force_preview=force), self._preview_ready, self._preview_failed)
 
     def _preview_ready(self, report: dict):
         self._set_busy(False)
-        self._say("Vista previa de la escena lista.")
-        if self.preview_index == self.current:
+        if report.get("cache_hit"):
+            status = "Vista previa recuperada de caché."
+        else:
+            status = "Vista previa de las escenas lista." if len(self.preview_indices) > 1 else "Vista previa de la escena lista."
+        self._say(status)
+        current_indices = [i for i, scene in enumerate(self.project["scenes"]) if scene["id"] in self.preview_scene_ids]
+        if not current_indices:
+            current_indices = [self.current]
+        if current_indices == self.preview_indices:
             self.player.setSource(QUrl.fromLocalFile(report["output"]))
             self.stack.setCurrentIndex(1)
             self.controls.setVisible(True)
@@ -940,11 +1076,17 @@ class StudioWindow(QMainWindow):
         folder = self.folder
         self._set_busy(True)
         self.open_btn.setVisible(False)
+        self.progress.setRange(0, len(self.project["scenes"]))
+        self.progress.setValue(0)
         self._say(f"Renderizando el video ({len(self.project['scenes'])} escenas)…")
         run_task(self, lambda progress: render_project(folder, progress=lambda n, total: progress((n, total))), self._rendered, self._render_failed, self._render_progress)
 
     def _render_progress(self, step):
         number, total = step
+        if number == 0:
+            self.progress.setRange(0, 0)
+            self._say("Ensamblando audio y video; el tiempo depende de la duración y cantidad de escenas…")
+            return
         self.progress.setRange(0, total)
         self.progress.setValue(number)
         self._say(f"Preparando escena {number} de {total} (voz, encuadre y zoom)…")
@@ -959,7 +1101,8 @@ class StudioWindow(QMainWindow):
     def _rendered(self, report: dict):
         self._set_busy(False)
         self.open_btn.setVisible(True)
-        self._say(f"Listo: {report['duration_seconds']} s. " + " ".join(report["warnings"]) + f"\n{report['output']}")
+        metadata = f"\nDatos para YouTube: {report['youtube_metadata']}" if report.get("youtube_metadata") else ""
+        self._say(f"Listo: {report['duration_seconds']} s. " + " ".join(report["warnings"]) + f"\n{report['output']}{metadata}")
 
 
 def _install_error_hook():

@@ -1,6 +1,6 @@
 # Video Factory — Documento de contexto para continuar el desarrollo
 
-> Estado documentado: commit `2fbc817` de la rama `main` (repositorio `https://github.com/AdrianSilvaTj/video_factory`), 23 de octubre de 2026.
+> Estado documentado: cambios locales de formato horizontal, render largo y metadatos para YouTube sobre el commit `db0a8b0` de `main`, 26 de octubre de 2026. Los cambios aún no están committeados ni se verificó el render con FFmpeg.
 > Este documento describe **lo que existe en el código hoy**, por qué está hecho así, qué trampas se encontraron y cómo extenderlo sin romper lo existente. Antes de basarte en un dato concreto (firma, ruta, nombre), verifica en el archivo: el usuario a veces restaura o edita archivos por su cuenta.
 
 ---
@@ -10,7 +10,7 @@
 **Video Factory** es una aplicación de escritorio para **Windows** (Python + PySide6) que produce **videos cortos verticales 9:16** (Reels, TikTok, Shorts) a partir de un **guion libre dividido en escenas**:
 
 - Cada escena tiene un **diálogo** (se convierte en voz neuronal con Microsoft Edge TTS) y **un recurso visual** (imagen o video) que puede venir de bancos gratuitos (Pexels, Pixabay, NASA, Wikimedia Commons, Openverse, Vecteezy) o de archivos del usuario.
-- La **duración de cada escena la fija su voz** (más una pausa de 0.35 s). La duración total del video es la suma; el objetivo de 45 s es solo un indicador/aviso.
+- La **duración de cada escena narrada** es la duración de su voz más una pausa de 0.35 s y el campo opcional `extra_seconds` (segundos adicionales de imagen/silencio, editable en cada tarjeta). En escenas sin diálogo se suma `extra_seconds` a `duration` (o a los 3 s por defecto). La duración total del video es la suma; el objetivo de 45 s es solo un indicador/aviso.
 - El render usa **FFmpeg** (encuadre 9:16, zoom suave en imágenes, subtítulos ASS quemados, música de fondo con fade-out, outro opcional).
 - Hay **dos canales** (plantillas de marca): "Qué curioso…¿no?" y "Belleza con evidencia"; cada uno recuerda su última configuración (voz, subtítulos, música, outro).
 - La app genera automáticamente un archivo de **créditos** (`creditos.txt`) con autor, enlace y licencia de cada recurso de banco usado.
@@ -113,9 +113,9 @@ data/
 │   ├── voice/<hash16>.wav|.mp3        # caché de voz sintetizada
 │   └── render/
 │       ├── video.mp4  render.json  creditos.txt  captions.ass
-│       ├── scenes/scene-NN.mp4|.wav|-frame.png    # intermedios por escena
+│       ├── .work-<id>/scenes/scene-NNNN.mp4|.wav|-frame.png # intermedios temporales de render; se borran al completar
 │       ├── frames/<stem>_<seg>.jpg    # fotogramas de videos para la vista previa de "Inicio"
-│       └── preview/scene.mp4 (+ scenes/, captions.ass)   # vista previa de UNA escena (540x960)
+│       └── preview/scene.mp4 + captions.ass   # vista previa de UNA escena (540x960 o 960x540)
 ├── channel_defaults.json              # {"last_channel": clave, "channels": {clave: ajustes}}
 ├── channel_defaults/<canal>/<archivo> # música/outro COMPARTIDOS por canal (una sola copia)
 ├── search_history.json                # lista de ≤20 términos, el más reciente primero
@@ -130,29 +130,33 @@ data/
   "schema_version": 1,
   "name": "Mi video",
   "channel": "que-curioso",                  // clave de CHANNELS
+  "orientation": "portrait",                 // portrait (9:16) | landscape (16:9)
   "voice": "male",                           // clave de VOICES
   "voice_settings": {"rate": -4, "pitch": -1, "volume": 0},   // enteros: % , Hz , %
   "music": {"enabled": true, "gain": 0.3, "path": null, "name": null},
   "outro": true,                             // bool: incluir outro
   "outro_file": null, "outro_name": null,    // outro propio (referencia 'shared:...')
   "subtitles": {"font": "Arial", "size": 128, "color": "#FFFFFF", "outline": "#241B10", "bold": true},
+  "youtube": {"title": "Mi video", "description": "", "tags": []},
   "scenes": [ { …escena… } ],
   "created_at": "…", "updated_at": "…"
 }
 ```
 - `music.path`: `null` = usar la música del canal (`CHANNELS[canal]["music"]`); `"shared:channel_defaults/<canal>/<archivo>"` = archivo compartido; una ruta sin prefijo = relativa a la carpeta del proyecto (proyectos antiguos). Se resuelve SIEMPRE con `project.resolve_asset(folder, ref)`.
 - `outro_file`: igual; `null` = usar `CHANNELS[canal]["outro"]` (puede ser `None`, p. ej. Belleza).
-- `load_project()` aplica **migraciones perezosas** con `setdefault` (`voice_settings`, `outro_file`, `outro_name`, `subtitles`, `music.path`) y descarta la clave obsoleta `subtitle_style`. **Cualquier campo nuevo debe añadirse aquí con `setdefault`** para no romper proyectos viejos.
+- `load_project()` aplica **migraciones perezosas** con `setdefault` (`voice_settings`, `outro_file`, `outro_name`, `subtitles`, `orientation=portrait`, `youtube`, `music.path`) y migra escenas antiguas de `zoom.direction` a `motion`. **Cualquier campo nuevo debe añadirse aquí con `setdefault`** para no romper proyectos viejos.
 
 ### 5.2 Escena (`new_scene()`)
 ```json
 {
-  "id": "a1b2c3d4", "dialogue": "texto…",
+  "id": "a1b2c3d4", "dialogue": "texto…", "chapter": "Título opcional de YouTube",
+  "motion": "zoom_in",               // preset de movimiento de imagen; proyectos viejos se migran desde zoom
   "media": null | {media_dict},
   "crop": "fill_9_16" | "4_3_blur" | "fit_blur",
-  "zoom": {"speed": "none|slow|medium|fast", "direction": "in|out"},   // solo imágenes
+  "zoom": {"speed": "none|slow|medium|fast", "direction": "in|out"},   // valores históricos para migración
   "start": 0.0,                 // segundo de inicio del clip (solo videos)
-  "duration": 3.0,              // usado solo si el diálogo está vacío
+  "duration": 3.0,              // duración base si el diálogo está vacío
+  "extra_seconds": 0.0,         // segundos adicionales al final de esta escena
   "subtitle_pos": "bottom" | "middle" | "top",
   "show_subtitles": true
 }
@@ -216,7 +220,7 @@ Funciones (todas síncronas, sin Qt; reutilizables desde scripts):
 | `wrap_width_for(size)` | `max(8, int(900/(size*0.52)))` caracteres por línea de subtítulo |
 | `caption_chunks(text, max_chars)` | Agrupa palabras en bloques ≤ max_chars (el render usa `wrap_width*2`) |
 | `subtitle_style_line(sub, name, alignment, margin_v)` | Línea `Style:` ASS (colores `#RRGGBB`→`&H00BBGGRR`, contorno = `max(4, round(size/12))`, MarginV por defecto 420) |
-| `render_project(folder, ffmpeg_explicit=None, progress=None, only_scene=None)` | Render completo o vista previa de una escena (ver §7). **Lee el proyecto desde disco** (`load_project`): la GUI debe guardar antes |
+| `render_project(folder, ffmpeg_explicit=None, progress=None, only_scene=None, only_scenes=None, force_preview=False)` | Render completo o vista previa de una escena/bloque consecutivo (ver §7). Las vistas se guardan en caché por huella de escena/ajustes/archivos; `force_preview=True` fuerza una nueva. **Lee el proyecto desde disco** (`load_project`): la GUI debe guardar antes |
 | `load_search_history`, `add_search_term(term, limit=20)` | `data/search_history.json` (sin duplicados, insensible a mayúsculas) |
 | `import_shared(channel, source) -> "shared:…"` | Copia **una sola vez** música/outro a `data/channel_defaults/<canal>/` (si ya existe un archivo del mismo nombre con distinto tamaño, añade sufijo) y devuelve la referencia |
 | `resolve_asset(folder, ref) -> Path` | `shared:` → `data/…`; otro valor → `folder/ref` |
@@ -248,7 +252,7 @@ Funciones (todas síncronas, sin Qt; reutilizables desde scripts):
 3. Las excepciones llegan como `str(exc)` a `on_fail` (si está vacío, el traceback). `proc.Cancelled` llega como `proc.CANCELLED`.
 
 ### 6.7 `gui/frame_preview.py`
-`compose_preview(project_dir, scene, sub, height, video_frame=None) -> QPixmap | None`: dibuja con QPainter el cuadro 9:16 de la escena **sin FFmpeg**: encuadre (`fill_9_16`, `4_3_blur` con ventana 1080×810 centrada, `fit_blur`; el fondo difuminado es una aproximación: reducir muy pequeño, ampliar suave y oscurecer) y subtítulos (primer bloque del diálogo o `SAMPLE_TEXT`; mismo `wrap_width_for`/`caption_chunks` que el render; contorno con `QPainterPath`). Devuelve `None` si no hay recurso o imagen legible. Para videos usa `video_frame` (fotograma en el segundo `start`) o la miniatura `media["thumb"]`.
+`compose_preview(project_dir, scene, sub, height, video_frame=None, orientation="portrait", max_width=None) -> QPixmap | None`: dibuja con QPainter el cuadro 9:16 o 16:9 de la escena **sin FFmpeg**: encuadre (`fill_9_16`, `4_3_blur` centrado, `fit_blur`; el fondo difuminado es una aproximación: reducir muy pequeño, ampliar suave y oscurecer) y subtítulos (primer bloque del diálogo o `SAMPLE_TEXT`; mismo `wrap_width_for`/`caption_chunks` que el render; contorno con `QPainterPath`). Devuelve `None` si no hay recurso o imagen legible. Para videos usa `video_frame` (fotograma en el segundo `start`) o la miniatura `media["thumb"]`.
 - **Calibración medida contra libass:** la altura de línea de libass = tamaño del estilo; por eso el tamaño de letra de Qt se calcula como `round(size*k*100 / metrics.height)` con una fuente de 100 px (ancho de texto coincide ≈ 2 % con el render). Posiciones: abajo = borde inferior del bloque a `1920 - margin_v(420)`, centro = centrado vertical, arriba = tope a `TOP_MARGIN = 260`. Si cambias estilos ASS en `project.py`, **cambia también aquí** (`TOP_MARGIN`, márgenes, contorno).
 
 ### 6.8 `gui/media_dialog.py` — modal de recursos
@@ -259,9 +263,9 @@ Funciones (todas síncronas, sin Qt; reutilizables desde scripts):
 
 ### 6.9 `gui/studio.py` — ventana principal
 `StudioWindow(projects_dir=PROJECTS_DIR)` + `SceneCard`. Layout: `QSplitter` horizontal con tres paneles; el tercero es un `QSplitter` vertical (detalle arriba, **registro redimensionable** abajo).
-- **Panel izquierdo (`general_panel`)**: grupo *Proyecto* (combo de proyectos por fecha de modificación, "Nuevo proyecto…"), *Opciones generales* (canal, voz, música activada + volumen 0-100 %, archivo de música con "Elegir archivo…"/"Usar la del canal", **"▶ Escuchar música"** que suena al volumen del slider y lo sigue en vivo, outro activado + "Elegir outro…"/"Usar el del canal"), *Ajustes de la voz* (velocidad −50…+50 %, tono −30…+30 Hz, volumen −50…+50 %, "Restablecer", "▶ Probar voz"), *Subtítulos* (fuente `QFontComboBox`, tamaño 30-250, color de texto y de contorno, negrita, muestra).
-- **Panel central (`scenes_panel`)**: título del proyecto, "Pegar guion…", lista de `SceneCard` (diálogo editable, miniatura que abre el modal, ↑ ↓ ✕) y "+ Añadir escena". Cada tarjeta muestra la duración estimada.
-- **Panel derecho (`detail_body` + registro)**: vista previa (`QStackedWidget`: página 0 = cuadro estático de `compose_preview`; página 1 = `QVideoWidget` con la vista previa en video, con ⏸/▶, barra de posición y clic para pausar), "Elegir o cambiar imagen / video…", "▶ Vista previa de la escena", encuadre, zoom (solo imágenes), inicio del video (solo videos; al cambiarlo se actualiza el cuadro), casilla "Mostrar subtítulos en esta escena", posición de subtítulos (deshabilitada si no se muestran), duración estimada total, "Renderizar video", "Abrir video renderizado" / "Abrir carpeta del video" (Explorador con el archivo seleccionado), barra de progreso + **Cancelar** (fila `progress_row`, fuera de `detail_body` para seguir activa), registro `log` (`_say(texto)` agrega líneas con hora).
+- **Panel izquierdo (`general_panel`)**: grupo *Proyecto* (combo de proyectos por fecha de modificación, "Nuevo proyecto…"), *Opciones generales* (formato por proyecto: vertical 9:16 u horizontal 16:9; canal, voz, música activada + volumen 0-100 %, archivo de música con "Elegir archivo…"/"Usar la del canal", **"▶ Escuchar música"** que suena al volumen del slider y lo sigue en vivo, outro activado + "Elegir outro…"/"Usar el del canal"), *Ajustes de la voz* (velocidad −50…+50 %, tono −30…+30 Hz, volumen −50…+50 %, "Restablecer", "▶ Probar voz"), *Subtítulos* (fuente `QFontComboBox`, tamaño 30-250, color de texto y de contorno, negrita, muestra).
+- **Panel central (`scenes_panel`)**: título del proyecto, "Pegar guion…", lista de `SceneCard` (diálogo editable, miniatura que abre el modal, tiempo extra, casilla para seleccionar escenas de vista previa, ↑ ↓ ✕) y "+ Añadir escena". Cada tarjeta muestra la duración estimada. El botón reproduce en orden el bloque consecutivo marcado (o solo la escena actual si no hay selección).
+- **Panel derecho (`detail_body` + registro)**: vista previa (`QStackedWidget`: página 0 = cuadro estático de `compose_preview`; página 1 = `QVideoWidget` con la vista previa en video, con ⏸/▶, barra de posición y clic para pausar), "Elegir o cambiar imagen / video…", "▶ Vista previa de la escena", encuadre, movimiento e intensidad (solo imágenes; imagen fija, zoom, paneo vertical/horizontal y zoom lateral), inicio del video (solo videos; al cambiarlo se actualiza el cuadro), casilla "Mostrar subtítulos en esta escena", posición de subtítulos (deshabilitada si no se muestran), duración estimada total, "Renderizar video", "Abrir video renderizado" / "Abrir carpeta del video" (Explorador con el archivo seleccionado), barra de progreso + **Cancelar** (fila `progress_row`, fuera de `detail_body` para seguir activa), registro `log` (`_say(texto)` agrega líneas con hora).
 - **Estado y convenciones internas:**
   - `self.loading`: `True` mientras se cargan widgets desde el modelo; los *handlers* (`_options_changed`, `_scene_options_changed`, …) hacen `return` si está activo. **Todo código que asigna valores a widgets debe envolverse en `loading = True/False`.**
   - `_changed()`: marca cambio → `save_timer` (500 ms, guarda `project.json`) y `frame_timer` (120 ms, redibuja el cuadro).
@@ -279,18 +283,18 @@ Funciones (todas síncronas, sin Qt; reutilizables desde scripts):
 Entrada: carpeta del proyecto. Salida: `render/video.mp4` (o `render/preview/scene.mp4` con `only_scene`) + informe.
 
 1. `load_project`; en vista previa solo la escena indicada; valida que cada escena tenga `media` y que el archivo exista (`FileNotFoundError("La escena N no tiene un recurso visual válido.")`) y que exista `data/tts-packages` si hay diálogo.
-2. Estilos ASS: `Default` (abajo, alineación 2, MarginV = `margin_v` 420), `Middle` (5, MarginV 0), `Top` (8, MarginV 260), con fuente/tamaño/colores del proyecto. Cabecera `PlayRes 1080x1920`.
+2. Estilos ASS: `Default` (abajo, alineación 2), `Middle` (5, MarginV 0), `Top` (8), con fuente/tamaño/colores del proyecto. Cabecera y dimensiones son 1080×1920 en `portrait` (predeterminado y migración para proyectos antiguos) o 1920×1080 en `landscape`; en horizontal el tamaño de subtítulo se escala a 72 % y los márgenes se adaptan.
 3. **Por escena** (se llama `progress(número, total)`):
-   - **Voz**: `synthesize_voice` (caché). `length = duración_wav + 0.35`. Sin diálogo: `length = scene["duration"]` y audio silencioso (`anullsrc`).
-   - **Audio de escena**: `scene-NN.wav` con `apad` hasta `length`.
-   - **Video de escena** (`scene-NN.mp4`, sin audio):
-     - Encuadre con `_frame_graph(crop, k)`: `fill_9_16` (cubrir y recortar), `4_3_blur` (fondo difuminado + ventana 4:3), `fit_blur` (fondo difuminado + imagen completa). `k = 2` en render final (trabaja a 2160×3840) y `k = 1` en vista previa.
-     - **Imágenes con zoom ≠ none**: se ajusta la foto **una sola vez** a un PNG del tamaño `k` (`scene-NN-frame.png`) y el zoom se hace con el filtro **`perspective` con `eval=frame` y `interpolation=cubic`** (interpola en posiciones sub-píxel; luego `scale=1080:1920:flags=lanczos`). *No usar `zoompan`: redondea la posición a píxeles enteros y la imagen "tiembla" (medido: desvío rms 0.144 px con zoompan vs 0.027 px con `perspective`).* La variable de tiempo en `perspective` es `in` (no `n`). `ZOOM_SPEEDS` fija el acercamiento total; `direction = out` invierte.
+   - **Voz**: `synthesize_voice` (caché). `length = duración_wav + 0.35 + extra_seconds`. Sin diálogo: `length = scene["duration"] + extra_seconds` y audio silencioso (`anullsrc`). El tiempo extra queda como imagen sostenida y audio en silencio después de la voz.
+   - **Audio de escena**: `scene-NNNN.wav` temporal con `apad` hasta `length`.
+   - **Video de escena** (`scene-NNNN.mp4`, sin audio):
+     - Encuadre con `_frame_graph(crop, k, orientation)`: llenar el cuadro, `4_3_blur` (fondo difuminado + ventana 4:3 centrada), `fit_blur` (fondo difuminado + imagen completa). `k = 2` en render final y `k = 1` en vista previa.
+     - **Imágenes con movimiento**: la foto se ajusta una sola vez a un PNG del tamaño `k`; zoom y paneos usan **`perspective` con `eval=frame` e `interpolation=cubic`**, con coordenadas subpíxel para evitar temblor. `motion` admite imagen fija, acercar/alejar, paneo arriba/abajo/izquierda/derecha y zoom lateral; el recorrido se calcula sobre el cuadro de `orientation`, tanto vertical como horizontal. *No sustituir por `zoompan`: redondea posiciones a píxeles enteros y el movimiento puede vibrar.*
      - Imágenes sin zoom y videos: `_frame_graph(...)` directo. Videos: `-stream_loop -1 -ss start` (si el clip es más corto que la voz, **se repite en bucle**).
      - Codificación: `libx264 crf 18 preset medium` (vista previa: `crf 28 veryfast`).
    - **Subtítulos**: el diálogo se parte en bloques (`caption_chunks(…, wrap_width*2)`), cada bloque dura proporcional a su número de palabras dentro de `length - 0.35`; el texto se ajusta con `textwrap.wrap(width=wrap_width)` y se une con `\N`; se omiten si `show_subtitles` es falso; el estilo depende de `subtitle_pos`. Los tiempos acumulan `cursor` (suma de `length`).
-4. **Mezcla final** (un solo comando FFmpeg): concatena videos de escena (`concat`) → `subtitles='<captions.ass>'` (en vista previa añade `scale=540:960`); concatena audios de escena = pista de voz; **música** (si `music.enabled` y el archivo existe; se repite con `-stream_loop -1`, se recorta a la duración total, `volume = gain`, **fade-out de 3 s al final**) mezclada con `amix duration=first normalize=0`; **outro** (solo render final; si `project.outro` y el archivo existe): se escala/recorta a 1080×1920, y si no tiene pista de audio (`_media_info`) se genera silencio con `anullsrc`; se concatena video y audio. Salida H.264 high, yuv420p, 30 fps, 8 Mb/s (vista previa 2 Mb/s), AAC 192 kb/s 48 kHz, `+faststart`.
-5. **Escritura atómica**: FFmpeg escribe a `video.part.mp4` y se hace `os.replace` solo si terminó bien; un render cancelado o fallido **nunca deja un video roto ni pisa el anterior**.
+4. **Ensamblado para proyectos largos**: `_write_concat_list` genera listas de archivos para el concat demuxer de FFmpeg. Une por copia de flujo los clips de video y presenta los WAV de voz mediante una segunda lista de concat, sin crear otro WAV gigante. Esto mantiene pequeño el número de entradas y la longitud del grafo de filtros aunque haya muchas escenas. La guía oficial exige streams compatibles en las partes concatenadas; todas las escenas se producen con la misma resolución, FPS y códec. Luego se queman subtítulos; **música** (si `music.enabled` y el archivo existe; se repite con `-stream_loop -1`, se recorta a la duración total, `volume = gain`, **fade-out de 3 s al final**) se mezcla con la voz; **outro** (solo render final; si `project.outro` y el archivo existe) se escala/recorta al tamaño de `orientation`, y si no tiene audio se genera silencio; se concatena video y audio. La duración permitida para las etapas de audio/video crece con la duración calculada del proyecto, y el ensamblado se muestra como progreso indeterminado. Salida H.264 high, yuv420p, 30 fps, 8 Mb/s (vista previa 2 Mb/s), AAC 192 kb/s 48 kHz, `+faststart`.
+5. **Escritura atómica y temporales**: FFmpeg escribe a `video.part.mp4` y se hace `os.replace` solo si terminó bien; un render cancelado o fallido **nunca deja un video roto ni pisa el anterior**. Los intermedios van a un `render/.work-<id>/` único y se borran al completar; si el render falla se conservan para diagnóstico. `captions.ass` sigue junto al MP4 final.
 6. Render final: copia `creditos.txt` a `render/`, calcula avisos (duración a más de 5 s de los 45 s objetivo; sin música; sin outro) y escribe `render/render.json`: `{"status","output","duration_seconds","target_seconds","scenes":[…],"warnings","rendered_at"}`.
 7. Tiempos de referencia (equipo del usuario): un video de ~16 s con 2 imágenes con zoom ≈ 80–120 s con las voces ya en caché; la primera síntesis de voz por escena toma unos segundos y necesita Internet.
 
@@ -303,7 +307,7 @@ Entrada: carpeta del proyecto. Salida: `render/video.mp4` (o `render/preview/sce
 - **Elegir recurso**: miniatura de la escena o botón → `pick_media(index)` → `MediaDialog` → si devuelve `media`, se asigna a la escena, se refresca la tarjeta y el cuadro, `_changed()`.
 - **Descargar varios** → quedan en `assets/` + `library.json`; se usan luego desde la pestaña 2.
 - **Vista previa del cuadro** (automática): `_refresh_frame` → `compose_preview`; para videos, `_video_frame` extrae en segundo plano el fotograma del `start` (caché `render/frames/<stem>_<start:.1f>.jpg`) y refresca al terminar; si el segundo no existe, avisa en el registro y deja la miniatura.
-- **Vista previa de escena** (botón): `_save_now` → `render_project(only_scene=i)` en hilo → reproduce `render/preview/scene.mp4` (con música; sin outro).
+- **Vista previa** (botón): `_save_now` → `render_project(only_scene=i)` para una escena o `render_project(only_scenes=[...])` para el bloque consecutivo marcado, en hilo → reproduce el MP4 guardado en `render/preview/cache/` (con música; sin outro). La huella incluye datos de las escenas, ajustes globales y fecha/tamaño de recursos; si coincide, retorna la vista sin renderizar. El botón "Volver a renderizar" pasa `force_preview=True`. Las selecciones no consecutivas se rechazan con un aviso.
 - **Renderizar**: `_save_now` → `_set_busy(True)` → `run_task(render_project, …)`; progreso por escena; cancelable.
 - **Probar voz**: `synthesize_voice` con una frase fija y los ajustes actuales; reproduce con `test_player`.
 - **Música/outro propios**: `import_shared(canal, archivo)` y se guarda la referencia `shared:` en el proyecto; `remember_channel_defaults` la convierte en el valor por defecto del canal. **Un proyecto depende de `data/channel_defaults/`**: si se mueve el proyecto a otro PC sin esa carpeta, el render avisa "Sin música de fondo: no existe …" y continúa sin ella.
@@ -428,6 +432,8 @@ Seguir `MediaDialog`: parent = ventana, `busy` para impedir cerrar durante hilos
 11. **Icono nuevo** (multi-tamaño, generado por `assets/make_icon.py`), icono en barra de tareas (`AppUserModelID`), consolas ocultas (`proc.run`), bloqueo de la UI durante procesos, **cancelar** con escritura atómica del video, botón de **escuchar música** (con volumen del slider).
 12. **Ajustes recordados por canal** y **música/outro compartidos** (`shared:`), outro propio.
 13. **Historial de búsquedas, selección múltiple con "Descargar" y pestaña de archivos del proyecto** con `library.json`.
+14. **Salida horizontal 16:9 para videos largos** con ensamblado temporal por partes; ahora cada escena admite un título opcional de capítulo y el proyecto guarda datos de publicación de YouTube. El render deja `youtube_metadata.txt` con descripción y capítulos si las marcas cumplen las reglas vigentes; la app todavía no sube ni programa videos.
+15. **Movimientos documentales en imágenes**: presets por escena de zoom, paneo vertical/horizontal y zoom lateral; son iguales para 9:16 y 16:9 y usan interpolación cúbica subpíxel.
 
 **Commits** (de más antiguo a más reciente): `7bbd8eb` estudio por escenas · `09da194` Vecteezy · `53a4ce5` arreglo Windows limpio + error log · `bc978e8` subida web de `Canal/*` (del usuario) · `80faab7` posición de subtítulos + abrir carpeta · `61ed21e` casilla de subtítulos por escena · `e7e8ec2` ajustes de voz y voces nuevas · `96fbb4e` vista previa viva · `d124c6d` cancelar/bloqueo/consolas/icono · `1d69b45` botón de música · `7914985` música con volumen del slider · `d612962` ajustes por canal y archivos compartidos · `2fbc817` historial, multi-descarga y pestaña de archivos.
 
@@ -450,7 +456,8 @@ Seguir `MediaDialog`: parent = ventana, `busy` para impedir cerrar durante hilos
 **Ideas no implementadas / consultadas**
 - Generación de imágenes con IA (OpenAI de pago, o servicios gratuitos por verificar) y de video con IA (no hay opción gratuita fiable por API; los modelos abiertos requieren GPU).
 - Otros bancos con API gratuita (p. ej. Coverr; requiere solicitar acceso).
-- Varios recursos por escena, transiciones entre escenas, ducking de música, selector de relaciones de aspecto adicionales (solo 9:16 en salida).
+- Varios recursos por escena, transiciones entre escenas, ducking de música, perfiles de calidad y optimizaciones para proyectos largos. La salida admite ahora 9:16 y 16:9.
+- Automatización de subida y programación de videos a YouTube, TikTok y Facebook (cada plataforma requiere integración propia).
 - Un tercer canal (hay que agregarlo en `channels.py` y subir sus archivos a `Canal/`).
 - Catálogo de temas para el canal Belleza (el canal solo cambia presentación; los guiones los escribe el usuario).
 

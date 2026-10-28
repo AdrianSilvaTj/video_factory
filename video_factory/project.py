@@ -88,8 +88,9 @@ def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ff
     return wav
 
 
-def new_scene(dialogue: str = "") -> dict:
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": True}
+def new_scene(dialogue: str = "", orientation: str = "portrait") -> dict:
+    """Empty scene; landscape videos start with subtitles hidden."""
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": orientation != "landscape", "mute_music": False, "clip_volume": 0.0, "sfx": []}
 
 
 def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
@@ -162,6 +163,42 @@ def resolve_asset(folder: Path, reference: str) -> Path:
     return folder / reference
 
 
+SFX_DIR = DEFAULTS_FILE.parent / "sfx_library"
+SFX_PRESETS = {
+    "Whoosh": "anoisesrc=d=0.8:c=pink:a=0.6,highpass=f=250,lowpass=f=5000,afade=t=in:d=0.4,afade=t=out:st=0.4:d=0.4",
+    "Subida": "aevalsrc='0.5*sin(2*PI*(300*t+500*t*t))':d=1:s=48000,afade=t=out:st=0.8:d=0.2",
+    "Bajada": "aevalsrc='0.5*sin(2*PI*(1100*t-500*t*t))':d=1:s=48000,afade=t=out:st=0.8:d=0.2",
+    "Pop": "sine=f=650:d=0.15:r=48000,afade=t=out:st=0.03:d=0.12",
+    "Ding": "sine=f=1318:d=1.2:r=48000,aecho=0.8:0.6:60:0.4,afade=t=out:st=0.2:d=1",
+    "Golpe grave": "sine=f=55:d=0.6:r=48000,afade=t=out:st=0.05:d=0.55,volume=3",
+    "Tic": "sine=f=2200:d=0.05:r=48000,afade=t=out:st=0.01:d=0.04",
+    "Alerta": "aevalsrc='0.5*sin(2*PI*880*t)*lt(mod(t,0.3),0.15)':d=0.9:s=48000",
+    "Suspenso": "anoisesrc=d=2.5:c=brown:a=0.8,lowpass=f=800,afade=t=in:d=2.3,afade=t=out:st=2.3:d=0.2",
+}
+
+
+def list_sfx_library(ffmpeg: str | None) -> list[tuple[str, str]]:
+    """(label, reference) of every sound effect in data/sfx_library, creating the built-in ones with FFmpeg when missing."""
+    SFX_DIR.mkdir(parents=True, exist_ok=True)
+    for name, source in SFX_PRESETS.items():
+        target = SFX_DIR / f"{slug(name)}.wav"
+        if ffmpeg and not target.is_file():
+            run([ffmpeg, "-y", "-f", "lavfi", "-i", source, "-ar", "48000", "-ac", "2", str(target)], capture_output=True, text=True, timeout=60)
+    files = sorted(p for p in SFX_DIR.iterdir() if p.suffix.casefold() in MUSIC_EXTENSIONS)
+    return [(p.stem.replace("-", " ").capitalize(), f"{SHARED_PREFIX}sfx_library/{p.name}") for p in files]
+
+
+def import_sfx(source: Path) -> str:
+    """Copy a sound effect into the shared library and return its reference."""
+    SFX_DIR.mkdir(parents=True, exist_ok=True)
+    target = SFX_DIR / f"{slug(source.stem)}{source.suffix.casefold()}"
+    if target.exists() and target.stat().st_size != source.stat().st_size:
+        target = SFX_DIR / f"{slug(source.stem)}-{uuid.uuid4().hex[:4]}{source.suffix.casefold()}"
+    if not target.exists():
+        shutil.copy2(source, target)
+    return f"{SHARED_PREFIX}sfx_library/{target.name}"
+
+
 def _shared_reference(folder: Path, channel: str, reference: str | None) -> str | None:
     """Turn a project-owned file (older projects) into a shared one; shared references are kept as they are."""
     if not reference or reference.startswith(SHARED_PREFIX):
@@ -218,6 +255,9 @@ def load_project(folder: Path) -> dict:
     project["music"].setdefault("path", None)
     for scene in project.get("scenes", []):
         scene.setdefault("zoom", {"speed": "slow", "direction": "in"})
+        scene.setdefault("mute_music", False)
+        scene.setdefault("clip_volume", 0.0)
+        scene.setdefault("sfx", [])
         scene["text_overlay"] = {**TEXT_OVERLAY_DEFAULTS, **(scene.get("text_overlay") or {})}
         if scene.get("motion") not in IMAGE_MOTIONS:
             speed = scene["zoom"].get("speed", "slow")
@@ -472,6 +512,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         music_path = resolve_asset(folder, music_ref) if music_ref else channel["music"]
         if music_path:
             asset_paths.append(Path(music_path))
+        asset_paths += [resolve_asset(folder, fx["path"]) for scene in scenes for fx in scene.get("sfx", [])]
         assets = []
         for path in asset_paths:
             try:
@@ -540,6 +581,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     k = 1 if preview else 2
     ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(width=frame_width, height=frame_height, style="\n".join([style_line, *overlay_styles]))], [], [], [], 0.0
     chapter_starts = [(0.0, (project.get("youtube", {}).get("title") or project["name"]).strip())]
+    warnings, muted_spans = [], []
     for number, scene in enumerate(scenes, start=1):
         if progress:
             progress(number, len(scenes))
@@ -559,7 +601,26 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             length = float(scene.get("duration") or EMPTY_SCENE_SECONDS) + max(0.0, float(scene.get("extra_seconds", 0)))
             audio_input = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
         audio_out = work_dir / "scenes" / f"scene-{number:04d}.wav"
-        proc = run([ffmpeg, "-y", *audio_input, "-af", f"{_AUDIO_FMT},apad=whole_dur={length:.4f}", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=max(120, int(length * 10)))
+        sfx_input, sfx_graph = [], []
+        for fx in scene.get("sfx", []):
+            sfx_file = resolve_asset(folder, fx["path"])
+            if not sfx_file.is_file() or not 0 <= float(fx["at"]) < length:
+                warnings.append(f"Escena {number}: se omitió el efecto {Path(fx['path']).name} (falta el archivo o su segundo cae fuera de la escena).")
+                continue
+            sfx_input += ["-i", str(sfx_file)]
+            delay = round(float(fx["at"]) * 1000)
+            sfx_graph.append(f"[{len(sfx_graph) + 1}:a]{_AUDIO_FMT},adelay={delay}|{delay},volume={float(fx.get('gain', 1.0))}[s{len(sfx_graph)}]")
+        clip_volume = float(scene.get("clip_volume") or 0)
+        if clip_volume > 0 and scene["media"].get("type") != "image":
+            clip_file = folder / scene["media"]["path"]
+            if _media_info(ffmpeg, clip_file)[0]:
+                sfx_input += ["-stream_loop", "-1", "-ss", f"{float(scene.get('start') or 0):.3f}", "-i", str(clip_file)]
+                sfx_graph.append(f"[{len(sfx_graph) + 1}:a:0]{_AUDIO_FMT},volume={clip_volume}[s{len(sfx_graph)}]")
+            else:
+                warnings.append(f"Escena {number}: el clip de video no tiene audio.")
+        mix = "".join(f"[s{i}]" for i in range(len(sfx_graph)))
+        audio_graph = ";".join([f"[0:a]{_AUDIO_FMT},apad=whole_dur={length:.4f}[voice]", *sfx_graph, f"[voice]{mix}amix=inputs={len(sfx_graph) + 1}:duration=first:dropout_transition=0:normalize=0[out]"])
+        proc = run([ffmpeg, "-y", *audio_input, *sfx_input, "-filter_complex", audio_graph, "-map", "[out]", "-t", f"{length:.4f}", str(audio_out)], capture_output=True, text=True, timeout=max(120, int(length * 10)))
         if proc.returncode or not audio_out.is_file():
             raise RuntimeError(f"Falló el audio de la escena {number}: {proc.stderr[-800:]}")
         scene_audios.append(audio_out)
@@ -601,7 +662,9 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             graph = _frame_graph(scene["crop"], orientation=orientation) + ";[l]null[v]"
         input_args = ["-loop", "1", "-framerate", "30", "-i", str(media)] if is_image else ["-stream_loop", "-1", "-ss", f"{float(scene.get('start') or 0):.3f}", "-i", str(media)]
         video_out = work_dir / "scenes" / f"scene-{number:04d}.mp4"
-        proc = run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[v]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=max(300, int(length * 60)))
+        # Mixed color tags between scenes make FFmpeg rebuild the final filter graph mid-video, dropping frames.
+        graph += ";[v]setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv[vt]"
+        proc = run([ffmpeg, "-y", *input_args, "-t", f"{length:.4f}", "-an", "-filter_complex", graph, "-map", "[vt]", "-c:v", "libx264", "-preset", "veryfast" if preview else "medium", "-crf", "28" if preview else "18", "-pix_fmt", "yuv420p", str(video_out)], capture_output=True, text=True, timeout=max(300, int(length * 60)))
         if proc.returncode or not video_out.is_file():
             raise RuntimeError(f"Falló el video de la escena {number}: {proc.stderr[-1200:]}")
         scene_videos.append(video_out)
@@ -618,6 +681,8 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             text = "\\N".join(textwrap.wrap(chunk.replace("{", "(").replace("}", ")"), width=wrap_width, break_long_words=False))
             ass_lines.append(f"Dialogue: 0,{_stamp(offset)},{_stamp(offset + span)},{SUBTITLE_POSITIONS.get(scene.get('subtitle_pos'), SUBTITLE_POSITIONS['bottom'])[0]},,0,0,0,,{text}\n")
             offset += span
+        if scene.get("mute_music"):
+            muted_spans.append((cursor, cursor + length))
         cursor += length
         records.append({"scene": number, "seconds": round(length, 2), "media": scene["media"]["path"], "crop": scene["crop"], "zoom": scene["zoom"] if is_image else None})
 
@@ -648,7 +713,8 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     next_input = 2
     if use_music:
         cmd += ["-stream_loop", "-1", "-i", str(music)]
-        graph += [f"[{next_input}:a:0]atrim=duration={total:.6f},asetpts=PTS-STARTPTS,{_AUDIO_FMT},volume={project['music']['gain']},afade=t=out:st={max(0.0, total - 3):.3f}:d=3[bed]", "[voice][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[main_audio]"]
+        silence = "".join(f",volume=0:enable='between(t,{start:.3f},{end:.3f})'" for start, end in muted_spans)
+        graph += [f"[{next_input}:a:0]atrim=duration={total:.6f},asetpts=PTS-STARTPTS,{_AUDIO_FMT},volume={project['music']['gain']}{silence},afade=t=out:st={max(0.0, total - 3):.3f}:d=3[bed]", "[voice][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[main_audio]"]
         next_input += 1
     else:
         graph.append("[voice]anull[main_audio]")
@@ -678,7 +744,6 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     shutil.copy2(write_credits(folder, project), out_dir / "creditos.txt")
     shutil.copy2(ass, out_dir / "captions.ass")
     metadata = write_youtube_metadata(out_dir, project, chapter_starts, total)
-    warnings = []
     if orientation == "portrait" and abs(total - TARGET_SECONDS) > 5:
         warnings.append(f"La duración del guion ({total:.1f} s) se aleja del objetivo de {TARGET_SECONDS} s.")
     if project["music"]["enabled"] and not use_music:

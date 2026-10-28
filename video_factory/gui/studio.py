@@ -16,8 +16,8 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout,
     QDialog, QDialogButtonBox, QFrame, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QListWidget, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QSplitter, QStackedWidget,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..channels import CHANNELS, TARGET_SECONDS, VOICES
@@ -25,7 +25,7 @@ from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
     CROPS, IMAGE_MOTIONS, MUSIC_EXTENSIONS, PROJECTS_DIR, TEXT_OVERLAY_DEFAULTS, create_project, estimate_seconds, extract_frame, import_media,
-    OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project,
+    OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project, list_sfx_library, import_sfx,
     split_script, synthesize_voice, voice_defaults,
 )
 from ..storage import APP_ROOT
@@ -182,11 +182,20 @@ class StudioWindow(QMainWindow):
         splitter.addWidget(self._build_detail())
         splitter.setSizes([300, 480, 560])
         self.setCentralWidget(splitter)
+        self._load_sfx_library()
         self._open_initial_project()
 
     def _build_general(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        tabs = QTabWidget()
+        QVBoxLayout(page).addWidget(tabs)
+
+        def add_tab(title: str) -> QVBoxLayout:
+            tab = QWidget()
+            tabs.addTab(tab, title)
+            return QVBoxLayout(tab)
+
+        layout = add_tab("Proyecto")
         box = QGroupBox("Proyecto")
         form = QFormLayout(box)
         self.project_combo = QComboBox()
@@ -200,7 +209,7 @@ class StudioWindow(QMainWindow):
         form.addRow(youtube_btn)
         layout.addWidget(box)
 
-        options = QGroupBox("Opciones generales")
+        options = QGroupBox("Formato y canal")
         form = QFormLayout(options)
         self.orientation = QComboBox()
         self.orientation.addItem("Vertical · 9:16", "portrait")
@@ -212,11 +221,56 @@ class StudioWindow(QMainWindow):
             self.channel.addItem(preset["label"], key)
         self.channel.activated.connect(self._channel_changed)
         form.addRow("Canal:", self.channel)
+        layout.addWidget(options)
+
+        outro_box = QGroupBox("Outro")
+        form = QFormLayout(outro_box)
+        self.outro = QCheckBox("Incluir outro")
+        self.outro.toggled.connect(self._options_changed)
+        form.addRow(self.outro)
+        self.outro_label = QLabel("Outro del canal")
+        self.outro_label.setWordWrap(True)
+        form.addRow("Archivo outro:", self.outro_label)
+        outro_buttons = QHBoxLayout()
+        pick_outro = QPushButton("Elegir outro…")
+        pick_outro.clicked.connect(self.pick_outro)
+        outro_buttons.addWidget(pick_outro)
+        reset_outro = QPushButton("Usar el del canal")
+        reset_outro.clicked.connect(self.reset_outro)
+        outro_buttons.addWidget(reset_outro)
+        form.addRow(outro_buttons)
+        layout.addWidget(outro_box)
+        layout.addStretch(1)
+
+        layout = add_tab("Voz")
+        tune = QGroupBox("Voz")
+        form = QFormLayout(tune)
         self.voice = QComboBox()
         for key, preset in VOICES.items():
             self.voice.addItem(preset["label"], key)
         self.voice.activated.connect(self._voice_changed)
         form.addRow("Voz:", self.voice)
+        self.voice_rate = self._voice_slider(form, "Velocidad:", -50, 50, "%")
+        self.voice_pitch = self._voice_slider(form, "Tono:", -30, 30, " Hz")
+        self.voice_volume = self._voice_slider(form, "Volumen:", -50, 50, "%")
+        tune_buttons = QHBoxLayout()
+        reset_voice = QPushButton("Restablecer")
+        reset_voice.setToolTip("Vuelve a los valores recomendados de esta voz")
+        reset_voice.clicked.connect(self._voice_changed)
+        tune_buttons.addWidget(reset_voice)
+        self.test_btn = QPushButton("▶ Probar voz")
+        self.test_btn.clicked.connect(self.test_voice)
+        tune_buttons.addWidget(self.test_btn)
+        form.addRow(tune_buttons)
+        self.test_player = QMediaPlayer(self)
+        self.test_audio = QAudioOutput()
+        self.test_player.setAudioOutput(self.test_audio)
+        layout.addWidget(tune)
+        layout.addStretch(1)
+
+        layout = add_tab("Música")
+        music_box = QGroupBox("Música de fondo")
+        form = QFormLayout(music_box)
         self.music = QCheckBox("Música de fondo")
         self.music.toggled.connect(self._options_changed)
         form.addRow(self.music)
@@ -243,41 +297,10 @@ class StudioWindow(QMainWindow):
         self.music_audio = QAudioOutput()
         self.music_player.setAudioOutput(self.music_audio)
         self.music_player.playbackStateChanged.connect(lambda state: self.music_btn.setText("⏹ Detener música" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Escuchar música"))
-        self.outro = QCheckBox("Incluir outro")
-        self.outro.toggled.connect(self._options_changed)
-        form.addRow(self.outro)
-        self.outro_label = QLabel("Outro del canal")
-        self.outro_label.setWordWrap(True)
-        form.addRow("Archivo outro:", self.outro_label)
-        outro_buttons = QHBoxLayout()
-        pick_outro = QPushButton("Elegir outro…")
-        pick_outro.clicked.connect(self.pick_outro)
-        outro_buttons.addWidget(pick_outro)
-        reset_outro = QPushButton("Usar el del canal")
-        reset_outro.clicked.connect(self.reset_outro)
-        outro_buttons.addWidget(reset_outro)
-        form.addRow(outro_buttons)
-        layout.addWidget(options)
+        layout.addWidget(music_box)
+        layout.addStretch(1)
 
-        tune = QGroupBox("Ajustes de la voz")
-        form = QFormLayout(tune)
-        self.voice_rate = self._voice_slider(form, "Velocidad:", -50, 50, "%")
-        self.voice_pitch = self._voice_slider(form, "Tono:", -30, 30, " Hz")
-        self.voice_volume = self._voice_slider(form, "Volumen:", -50, 50, "%")
-        tune_buttons = QHBoxLayout()
-        reset_voice = QPushButton("Restablecer")
-        reset_voice.setToolTip("Vuelve a los valores recomendados de esta voz")
-        reset_voice.clicked.connect(self._voice_changed)
-        tune_buttons.addWidget(reset_voice)
-        self.test_btn = QPushButton("▶ Probar voz")
-        self.test_btn.clicked.connect(self.test_voice)
-        tune_buttons.addWidget(self.test_btn)
-        form.addRow(tune_buttons)
-        self.test_player = QMediaPlayer(self)
-        self.test_audio = QAudioOutput()
-        self.test_player.setAudioOutput(self.test_audio)
-        layout.addWidget(tune)
-
+        layout = add_tab("Subtítulos")
         subs = QGroupBox("Subtítulos")
         form = QFormLayout(subs)
         self.font = QFontComboBox()
@@ -377,6 +400,11 @@ class StudioWindow(QMainWindow):
         controls.addWidget(self.seek, 1)
         self.time_label = QLabel("0:00")
         controls.addWidget(self.time_label)
+        self.open_preview_btn = QPushButton("Abrir en Windows")
+        self.open_preview_btn.setToolTip("Abre la vista previa en el reproductor predeterminado de Windows")
+        self.open_preview_btn.clicked.connect(self._open_preview_external)
+        controls.addWidget(self.open_preview_btn)
+        self.preview_file: str | None = None
         self.controls.setVisible(False)
         layout.addWidget(self.controls)
         self.player.positionChanged.connect(self._on_position)
@@ -397,7 +425,10 @@ class StudioWindow(QMainWindow):
         self.force_preview_btn.clicked.connect(lambda: self.preview_scene(force=True))
         buttons.addWidget(self.force_preview_btn)
         layout.addLayout(buttons)
-        form = QFormLayout()
+        scene_tabs = QTabWidget()
+        visual_tab = QWidget()
+        scene_tabs.addTab(visual_tab, "Imagen / video")
+        form = QFormLayout(visual_tab)
         self.crop = QComboBox()
         for key, label in CROPS.items():
             self.crop.addItem(label, key)
@@ -426,6 +457,11 @@ class StudioWindow(QMainWindow):
         self.start.valueChanged.connect(self._scene_options_changed)
         self.start_label = QLabel("Inicio del video:")
         form.addRow(self.start_label, self.start)
+        text_tab = QWidget()
+        scene_tabs.addTab(text_tab, "Texto")
+        text_layout = QVBoxLayout(text_tab)
+        form = QFormLayout()
+        text_layout.addLayout(form)
         self.sub_show = QCheckBox("Mostrar subtítulos en esta escena")
         self.sub_show.toggled.connect(self._scene_options_changed)
         form.addRow(self.sub_show)
@@ -434,7 +470,6 @@ class StudioWindow(QMainWindow):
             self.sub_pos.addItem(label, key)
         self.sub_pos.activated.connect(self._scene_options_changed)
         form.addRow("Posición de subtítulos:", self.sub_pos)
-        layout.addLayout(form)
 
         overlay = QGroupBox("Texto en imagen")
         overlay_form = QFormLayout(overlay)
@@ -456,7 +491,73 @@ class StudioWindow(QMainWindow):
         self.overlay_color = QPushButton("Elegir color…")
         self.overlay_color.clicked.connect(self._choose_overlay_color)
         overlay_form.addRow("Color:", self.overlay_color)
-        layout.addWidget(overlay)
+        text_layout.addWidget(overlay)
+        text_layout.addStretch(1)
+
+        audio_tab = QWidget()
+        scene_tabs.addTab(audio_tab, "Audio")
+        audio_layout = QVBoxLayout(audio_tab)
+        self.mute_music = QCheckBox("Silenciar la música de fondo en esta escena")
+        self.mute_music.toggled.connect(self._scene_options_changed)
+        audio_layout.addWidget(self.mute_music)
+        clip_row = QHBoxLayout()
+        self.clip_volume_label = QLabel("Volumen del audio del clip de video:")
+        clip_row.addWidget(self.clip_volume_label)
+        self.clip_volume = QSlider(Qt.Orientation.Horizontal)
+        self.clip_volume.setRange(0, 200)
+        self.clip_volume.setToolTip("0 % silencia el sonido original del clip; 100 % lo deja a su volumen original")
+        self.clip_volume.valueChanged.connect(self._scene_options_changed)
+        clip_row.addWidget(self.clip_volume, 1)
+        self.clip_volume_value = QLabel("0 %")
+        self.clip_volume_value.setMinimumWidth(44)
+        clip_row.addWidget(self.clip_volume_value)
+        audio_layout.addLayout(clip_row)
+        sfx_box = QGroupBox("Efectos de sonido")
+        sfx_layout = QVBoxLayout(sfx_box)
+        self.sfx_list = QListWidget()
+        self.sfx_list.setMaximumHeight(90)
+        self.sfx_list.currentRowChanged.connect(self._sfx_selected)
+        sfx_layout.addWidget(self.sfx_list)
+        library_row = QHBoxLayout()
+        self.sfx_library = QComboBox()
+        self.sfx_library.setToolTip("Efectos de la biblioteca compartida (data/sfx_library). Los archivos que pongas allí aparecen aquí.")
+        library_row.addWidget(self.sfx_library, 1)
+        add_library = QPushButton("Agregar")
+        add_library.clicked.connect(self.add_library_sfx)
+        library_row.addWidget(add_library)
+        add_file = QPushButton("Archivo propio…")
+        add_file.setToolTip("Elige un archivo de audio; se guarda en la biblioteca y se agrega a esta escena")
+        add_file.clicked.connect(self.add_file_sfx)
+        library_row.addWidget(add_file)
+        sfx_layout.addLayout(library_row)
+        sfx_form = QFormLayout()
+        self.sfx_at = QDoubleSpinBox()
+        self.sfx_at.setRange(0, 600)
+        self.sfx_at.setDecimals(1)
+        self.sfx_at.setSuffix(" s")
+        self.sfx_at.setToolTip("Segundo de la escena en que suena el efecto")
+        self.sfx_at.valueChanged.connect(self._sfx_edited)
+        sfx_form.addRow("En el segundo:", self.sfx_at)
+        self.sfx_gain = QSlider(Qt.Orientation.Horizontal)
+        self.sfx_gain.setRange(5, 200)
+        self.sfx_gain.valueChanged.connect(self._sfx_edited)
+        sfx_form.addRow("Volumen:", self.sfx_gain)
+        sfx_layout.addLayout(sfx_form)
+        sfx_buttons = QHBoxLayout()
+        self.sfx_play = QPushButton("▶ Escuchar")
+        self.sfx_play.clicked.connect(self._play_sfx)
+        sfx_buttons.addWidget(self.sfx_play)
+        self.sfx_remove = QPushButton("Quitar")
+        self.sfx_remove.clicked.connect(self.remove_sfx)
+        sfx_buttons.addWidget(self.sfx_remove)
+        sfx_layout.addLayout(sfx_buttons)
+        audio_layout.addWidget(sfx_box)
+        audio_layout.addStretch(1)
+        self.sfx_player = QMediaPlayer(self)
+        self.sfx_output = QAudioOutput()
+        self.sfx_player.setAudioOutput(self.sfx_output)
+        self.sfx_player.playbackStateChanged.connect(lambda state: self.sfx_play.setText("⏹ Detener" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Escuchar"))
+        layout.addWidget(scene_tabs)
 
         self.total = QLabel()
         layout.addWidget(self.total)
@@ -676,6 +777,10 @@ class StudioWindow(QMainWindow):
         if self.loading:
             return
         self.project["orientation"] = self.orientation.currentData()
+        if self.project["orientation"] == "landscape":
+            for scene in self.project["scenes"]:
+                scene["show_subtitles"] = False
+            self.select_scene(self.current)
         self._update_total()
         self._refresh_frame()
         self._changed()
@@ -960,6 +1065,10 @@ class StudioWindow(QMainWindow):
         self.sub_pos.setCurrentIndex(self.sub_pos.findData(scene.get("subtitle_pos", "bottom")))
         self.sub_show.setChecked(scene.get("show_subtitles", True))
         self.sub_pos.setEnabled(self.sub_show.isChecked())
+        self.mute_music.setChecked(scene.get("mute_music", False))
+        self.clip_volume.setValue(round(float(scene.get("clip_volume") or 0) * 100))
+        self.clip_volume_value.setText(f"{self.clip_volume.value()} %")
+        self._load_sfx_list()
         overlay = {**TEXT_OVERLAY_DEFAULTS, **scene.get("text_overlay", {})}
         self.overlay_text.setPlainText(overlay["text"])
         self.overlay_pos.setCurrentIndex(self.overlay_pos.findData(overlay["position"]))
@@ -971,6 +1080,8 @@ class StudioWindow(QMainWindow):
         for widget in (self.zoom_label, self.motion_preset, self.zoom_speed):
             widget.setEnabled(is_image)
         for widget in (self.start_label, self.start):
+            widget.setEnabled(bool(media) and not is_image)
+        for widget in (self.clip_volume_label, self.clip_volume, self.clip_volume_value):
             widget.setEnabled(bool(media) and not is_image)
         self._refresh_frame()
         self.loading = False
@@ -991,8 +1102,93 @@ class StudioWindow(QMainWindow):
         scene["start"] = self.start.value()
         scene["subtitle_pos"] = self.sub_pos.currentData()
         scene["show_subtitles"] = self.sub_show.isChecked()
+        scene["mute_music"] = self.mute_music.isChecked()
+        scene["clip_volume"] = self.clip_volume.value() / 100
+        self.clip_volume_value.setText(f"{self.clip_volume.value()} %")
         self.sub_pos.setEnabled(self.sub_show.isChecked())
         self._changed()
+
+    def _load_sfx_library(self):
+        self.sfx_library.clear()
+        for label, reference in list_sfx_library(_find_ffmpeg()):
+            self.sfx_library.addItem(label, reference)
+
+    def _load_sfx_list(self, select: int = -1):
+        """Fill the effects list of the current scene; the pending-changes flag stays untouched."""
+        effects = self.project["scenes"][self.current].get("sfx", [])
+        was_loading, self.loading = self.loading, True
+        self.sfx_list.clear()
+        for fx in effects:
+            self.sfx_list.addItem(f"{Path(fx['path']).stem.replace('-', ' ').capitalize()} · {fx['at']:.1f} s · {round(fx.get('gain', 1.0) * 100)} %")
+        self.sfx_list.setCurrentRow(select if 0 <= select < len(effects) else (0 if effects else -1))
+        self._sfx_selected(self.sfx_list.currentRow())
+        self.loading = was_loading
+
+    def _sfx_selected(self, row: int):
+        self.sfx_player.stop()
+        effects = self.project["scenes"][self.current].get("sfx", []) if self.project.get("scenes") else []
+        found = 0 <= row < len(effects)
+        for widget in (self.sfx_at, self.sfx_gain, self.sfx_play, self.sfx_remove):
+            widget.setEnabled(found)
+        if found:
+            was_loading, self.loading = self.loading, True
+            self.sfx_at.setValue(float(effects[row]["at"]))
+            self.sfx_gain.setValue(round(float(effects[row].get("gain", 1.0)) * 100))
+            self.loading = was_loading
+
+    def _sfx_edited(self, *_):
+        row = self.sfx_list.currentRow()
+        effects = self.project["scenes"][self.current].setdefault("sfx", [])
+        if self.loading or not 0 <= row < len(effects):
+            return
+        effects[row].update({"at": round(self.sfx_at.value(), 1), "gain": self.sfx_gain.value() / 100})
+        self._load_sfx_list(row)
+        self._changed()
+
+    def _append_sfx(self, reference: str):
+        effects = self.project["scenes"][self.current].setdefault("sfx", [])
+        effects.append({"path": reference, "at": 0.0, "gain": 1.0})
+        self._load_sfx_list(len(effects) - 1)
+        self._changed()
+
+    def add_library_sfx(self):
+        if self.sfx_library.currentData():
+            self._append_sfx(self.sfx_library.currentData())
+
+    def add_file_sfx(self):
+        extensions = " ".join("*" + e for e in sorted(MUSIC_EXTENSIONS))
+        file, _ = QFileDialog.getOpenFileName(self, "Elegir efecto de sonido", "", f"Audio ({extensions})")
+        if not file:
+            return
+        if Path(file).suffix.casefold() not in MUSIC_EXTENSIONS:
+            QMessageBox.warning(self, "Formato no admitido", "Usa MP3, WAV, M4A, OGG, AAC o FLAC.")
+            return
+        reference = import_sfx(Path(file))
+        self._load_sfx_library()
+        self._append_sfx(reference)
+
+    def remove_sfx(self):
+        row = self.sfx_list.currentRow()
+        effects = self.project["scenes"][self.current].get("sfx", [])
+        if 0 <= row < len(effects):
+            del effects[row]
+            self._load_sfx_list(min(row, len(effects) - 1))
+            self._changed()
+
+    def _play_sfx(self):
+        if self.sfx_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.sfx_player.stop()
+            return
+        row = self.sfx_list.currentRow()
+        effects = self.project["scenes"][self.current].get("sfx", [])
+        if 0 <= row < len(effects):
+            path = resolve_asset(self.folder, effects[row]["path"])
+            if not path.is_file():
+                self._say(f"No encuentro el efecto: {path}")
+                return
+            self.sfx_output.setVolume(min(1.0, float(effects[row].get("gain", 1.0))))
+            self.sfx_player.setSource(QUrl.fromLocalFile(str(path)))
+            self.sfx_player.play()
 
     def _update_total(self):
         total = sum(estimate_seconds(s["dialogue"], s.get("duration", 3.0), s.get("extra_seconds", 0)) for s in self.project["scenes"])
@@ -1004,7 +1200,7 @@ class StudioWindow(QMainWindow):
 
     def add_scene(self):
         index = self.current + 1
-        self.project["scenes"].insert(index, new_scene())
+        self.project["scenes"].insert(index, new_scene(orientation=self.project.get("orientation", "portrait")))
         self.current = index
         self._rebuild_scenes()
         self.cards[index].text.setFocus()
@@ -1019,7 +1215,7 @@ class StudioWindow(QMainWindow):
         cursor = card.text.textCursor()
         after = value[position:]
         scenes[index]["dialogue"] = before
-        scenes.insert(index + 1, new_scene(after))
+        scenes.insert(index + 1, new_scene(after, self.project.get("orientation", "portrait")))
         self.current = index + 1
         self._rebuild_scenes()
         next_card = self.cards[self.current]
@@ -1034,7 +1230,7 @@ class StudioWindow(QMainWindow):
         text, ok = QInputDialog.getMultiLineText(self, "Pegar guion", "Cada párrafo (separado por una línea en blanco) será una escena:")
         if not ok or not text.strip():
             return
-        scenes = [new_scene(t) for t in split_script(text)]
+        scenes = [new_scene(t, self.project.get("orientation", "portrait")) for t in split_script(text)]
         only_empty = len(self.project["scenes"]) == 1 and not self.project["scenes"][0]["dialogue"].strip() and not self.project["scenes"][0]["media"]
         self.project["scenes"] = scenes if only_empty else self.project["scenes"] + scenes
         self.current = len(self.project["scenes"]) - len(scenes)
@@ -1053,7 +1249,7 @@ class StudioWindow(QMainWindow):
     def delete_scene(self, index: int):
         scenes = self.project["scenes"]
         if len(scenes) == 1:
-            scenes[0] = new_scene()
+            scenes[0] = new_scene(orientation=self.project.get("orientation", "portrait"))
         elif QMessageBox.question(self, "Eliminar escena", f"¿Eliminar la escena {index + 1}?") == QMessageBox.StandardButton.Yes:
             del scenes[index]
         else:
@@ -1110,10 +1306,16 @@ class StudioWindow(QMainWindow):
         if not current_indices:
             current_indices = [self.current]
         if current_indices == self.preview_indices:
+            self.preview_file = report["output"]
             self.player.setSource(QUrl.fromLocalFile(report["output"]))
             self.stack.setCurrentIndex(1)
             self.controls.setVisible(True)
             self.player.play()
+
+    def _open_preview_external(self):
+        if self.preview_file and Path(self.preview_file).is_file():
+            self.player.pause()
+            os.startfile(self.preview_file)
 
     def _preview_failed(self, error: str):
         self._set_busy(False)

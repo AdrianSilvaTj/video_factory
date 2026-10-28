@@ -583,7 +583,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
                 if orientation == "landscape" and motion in {"pan_up", "pan_down"}:
                     prepare_graph = f"[0:v]scale={motion_w}:-2:flags=lanczos,scale='ceil(iw*{overscan}/2)*2':'ceil(ih*{overscan}/2)*2':flags=lanczos,setsar=1[o]"
                 else:
-                    prepare_graph = f"[0:v]scale='ceil(iw*min({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':'ceil(ih*min({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':flags=lanczos,setsar=1[o]"
+                    prepare_graph = f"[0:v]scale='ceil(iw*max({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':'ceil(ih*max({motion_w}/iw,{motion_h}/ih)*{overscan}/2)*2':flags=lanczos,setsar=1[o]"
                 motion_graph = _fill_pan_graph(motion, speed, motion_w, motion_h, frames)
             else:
                 # Fit the photo once into the frame; the zoom then only resamples that small still.

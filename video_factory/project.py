@@ -44,6 +44,7 @@ IMAGE_MOTIONS = {
     "zoom_right": "Zoom lateral hacia la derecha",
 }
 TEXT_OVERLAY_DEFAULTS = {"text": "", "position": "top", "size": 64, "color": "#FFFFFF"}
+FADE_DEFAULTS = {"in": False, "out": False, "seconds": 1.5}
 MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"}
 
 
@@ -90,7 +91,7 @@ def synthesize_voice(folder: Path, text: str, voice_key: str, settings: dict, ff
 
 def new_scene(dialogue: str = "", orientation: str = "portrait") -> dict:
     """Empty scene; landscape videos start with subtitles hidden."""
-    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": orientation != "landscape", "mute_music": False, "clip_volume": 0.0, "sfx": []}
+    return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": orientation != "landscape", "mute_music": False, "music_fade": dict(FADE_DEFAULTS), "clip_volume": 0.0, "sfx": [], "sfx_fade": dict(FADE_DEFAULTS)}
 
 
 def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
@@ -256,6 +257,8 @@ def load_project(folder: Path) -> dict:
     for scene in project.get("scenes", []):
         scene.setdefault("zoom", {"speed": "slow", "direction": "in"})
         scene.setdefault("mute_music", False)
+        scene["music_fade"] = {**FADE_DEFAULTS, **(scene.get("music_fade") or {})}
+        scene["sfx_fade"] = {**FADE_DEFAULTS, **(scene.get("sfx_fade") or {})}
         scene.setdefault("clip_volume", 0.0)
         scene.setdefault("sfx", [])
         scene["text_overlay"] = {**TEXT_OVERLAY_DEFAULTS, **(scene.get("text_overlay") or {})}
@@ -581,7 +584,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     k = 1 if preview else 2
     ass_lines, scene_videos, scene_audios, records, cursor = [_ASS_HEADER.format(width=frame_width, height=frame_height, style="\n".join([style_line, *overlay_styles]))], [], [], [], 0.0
     chapter_starts = [(0.0, (project.get("youtube", {}).get("title") or project["name"]).strip())]
-    warnings, muted_spans = [], []
+    warnings, muted_spans, music_fades = [], [], []
     for number, scene in enumerate(scenes, start=1):
         if progress:
             progress(number, len(scenes))
@@ -609,7 +612,13 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
                 continue
             sfx_input += ["-i", str(sfx_file)]
             delay = round(float(fx["at"]) * 1000)
-            sfx_graph.append(f"[{len(sfx_graph) + 1}:a]{_AUDIO_FMT},adelay={delay}|{delay},volume={float(fx.get('gain', 1.0))}[s{len(sfx_graph)}]")
+            fade, fades = scene["sfx_fade"], ""
+            if fade["in"] or fade["out"]:
+                effect_seconds = min(_media_info(ffmpeg, sfx_file)[1], length - float(fx["at"]))
+                fade_seconds = min(float(fade["seconds"]), effect_seconds / 2)
+                fades += f",afade=t=in:st=0:d={fade_seconds:.3f}" if fade["in"] else ""
+                fades += f",afade=t=out:st={effect_seconds - fade_seconds:.3f}:d={fade_seconds:.3f}" if fade["out"] else ""
+            sfx_graph.append(f"[{len(sfx_graph) + 1}:a]{_AUDIO_FMT}{fades},adelay={delay}|{delay},volume={float(fx.get('gain', 1.0))}[s{len(sfx_graph)}]")
         clip_volume = float(scene.get("clip_volume") or 0)
         if clip_volume > 0 and scene["media"].get("type") != "image":
             clip_file = folder / scene["media"]["path"]
@@ -683,6 +692,11 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
             offset += span
         if scene.get("mute_music"):
             muted_spans.append((cursor, cursor + length))
+        elif scene["music_fade"]["in"] or scene["music_fade"]["out"]:
+            fade_seconds = max(0.05, min(float(scene["music_fade"]["seconds"]), length))
+            fade_in = f"min(1,(t-{cursor:.3f})/{fade_seconds:.3f})" if scene["music_fade"]["in"] else "1"
+            fade_out = f"min(1,({cursor + length:.3f}-t)/{fade_seconds:.3f})" if scene["music_fade"]["out"] else "1"
+            music_fades.append(f",volume='if(between(t,{cursor:.3f},{cursor + length:.3f}),{fade_in}*{fade_out},1)':eval=frame")
         cursor += length
         records.append({"scene": number, "seconds": round(length, 2), "media": scene["media"]["path"], "crop": scene["crop"], "zoom": scene["zoom"] if is_image else None})
 
@@ -714,7 +728,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
     if use_music:
         cmd += ["-stream_loop", "-1", "-i", str(music)]
         silence = "".join(f",volume=0:enable='between(t,{start:.3f},{end:.3f})'" for start, end in muted_spans)
-        graph += [f"[{next_input}:a:0]atrim=duration={total:.6f},asetpts=PTS-STARTPTS,{_AUDIO_FMT},volume={project['music']['gain']}{silence},afade=t=out:st={max(0.0, total - 3):.3f}:d=3[bed]", "[voice][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[main_audio]"]
+        graph += [f"[{next_input}:a:0]atrim=duration={total:.6f},asetpts=PTS-STARTPTS,{_AUDIO_FMT},volume={project['music']['gain']}{silence}{''.join(music_fades)},afade=t=out:st={max(0.0, total - 3):.3f}:d=3[bed]", "[voice][bed]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[main_audio]"]
         next_input += 1
     else:
         graph.append("[voice]anull[main_audio]")

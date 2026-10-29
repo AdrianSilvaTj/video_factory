@@ -500,6 +500,30 @@ class StudioWindow(QMainWindow):
         self.mute_music = QCheckBox("Silenciar la música de fondo en esta escena")
         self.mute_music.toggled.connect(self._scene_options_changed)
         audio_layout.addWidget(self.mute_music)
+
+        def fade_row(text: str, tip: str):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(text))
+            fade_in, fade_out = QCheckBox("Fade-in"), QCheckBox("Fade-out")
+            fade_in.setToolTip(tip + " con un aumento gradual de volumen al empezar")
+            fade_out.setToolTip(tip + " con una bajada gradual de volumen al terminar")
+            seconds = QDoubleSpinBox()
+            seconds.setRange(0.1, 30)
+            seconds.setDecimals(1)
+            seconds.setSingleStep(0.5)
+            seconds.setValue(1.5)
+            seconds.setSuffix(" s")
+            seconds.setToolTip("Duración de cada fade")
+            for widget in (fade_in, fade_out):
+                widget.toggled.connect(self._scene_options_changed)
+                row.addWidget(widget)
+            seconds.valueChanged.connect(self._scene_options_changed)
+            row.addWidget(seconds)
+            row.addStretch(1)
+            return row, fade_in, fade_out, seconds
+
+        music_fade_row, self.music_fade_in, self.music_fade_out, self.music_fade_seconds = fade_row("Música en la escena:", "La música entra o sale")
+        audio_layout.addLayout(music_fade_row)
         clip_row = QHBoxLayout()
         self.clip_volume_label = QLabel("Volumen del audio del clip de video:")
         clip_row.addWidget(self.clip_volume_label)
@@ -543,6 +567,8 @@ class StudioWindow(QMainWindow):
         self.sfx_gain.valueChanged.connect(self._sfx_edited)
         sfx_form.addRow("Volumen:", self.sfx_gain)
         sfx_layout.addLayout(sfx_form)
+        sfx_fade_row, self.sfx_fade_in, self.sfx_fade_out, self.sfx_fade_seconds = fade_row("Efectos de la escena:", "Cada efecto entra o sale")
+        sfx_layout.addLayout(sfx_fade_row)
         sfx_buttons = QHBoxLayout()
         self.sfx_play = QPushButton("▶ Escuchar")
         self.sfx_play.clicked.connect(self._play_sfx)
@@ -1066,6 +1092,11 @@ class StudioWindow(QMainWindow):
         self.sub_show.setChecked(scene.get("show_subtitles", True))
         self.sub_pos.setEnabled(self.sub_show.isChecked())
         self.mute_music.setChecked(scene.get("mute_music", False))
+        for prefix, key in (("music", "music_fade"), ("sfx", "sfx_fade")):
+            fade = {"in": False, "out": False, "seconds": 1.5, **(scene.get(key) or {})}
+            getattr(self, f"{prefix}_fade_in").setChecked(fade["in"])
+            getattr(self, f"{prefix}_fade_out").setChecked(fade["out"])
+            getattr(self, f"{prefix}_fade_seconds").setValue(float(fade["seconds"]))
         self.clip_volume.setValue(round(float(scene.get("clip_volume") or 0) * 100))
         self.clip_volume_value.setText(f"{self.clip_volume.value()} %")
         self._load_sfx_list()
@@ -1104,6 +1135,8 @@ class StudioWindow(QMainWindow):
         scene["show_subtitles"] = self.sub_show.isChecked()
         scene["mute_music"] = self.mute_music.isChecked()
         scene["clip_volume"] = self.clip_volume.value() / 100
+        for prefix, key in (("music", "music_fade"), ("sfx", "sfx_fade")):
+            scene[key] = {"in": getattr(self, f"{prefix}_fade_in").isChecked(), "out": getattr(self, f"{prefix}_fade_out").isChecked(), "seconds": getattr(self, f"{prefix}_fade_seconds").value()}
         self.clip_volume_value.setText(f"{self.clip_volume.value()} %")
         self.sub_pos.setEnabled(self.sub_show.isChecked())
         self._changed()

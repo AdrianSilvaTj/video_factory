@@ -25,7 +25,7 @@ from .. import proc
 from ..pipeline import _find_ffmpeg
 from ..project import (
     CROPS, IMAGE_MOTIONS, MUSIC_EXTENSIONS, PROJECTS_DIR, TEXT_OVERLAY_DEFAULTS, create_project, estimate_seconds, extract_frame, import_media,
-    OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_project, resolve_asset, save_project, list_sfx_library, import_sfx,
+    OUTRO_EXTENSIONS, apply_channel_defaults, import_shared, last_channel, load_project, new_scene, remember_channel_defaults, render_output_path, render_project, resolve_asset, save_project, list_sfx_library, import_sfx,
     split_script, synthesize_voice, voice_defaults,
 )
 from ..storage import APP_ROOT
@@ -595,11 +595,11 @@ class StudioWindow(QMainWindow):
         open_row = QHBoxLayout(self.open_btn)
         open_row.setContentsMargins(0, 0, 0, 0)
         play = QPushButton("Abrir video renderizado")
-        play.clicked.connect(lambda: os.startfile(self.folder / "render" / "video.mp4"))
+        play.clicked.connect(lambda: os.startfile(self._rendered_video()))
         open_row.addWidget(play)
         show = QPushButton("Abrir carpeta del video")
         show.setToolTip("Abre el Explorador de archivos con el video seleccionado")
-        show.clicked.connect(lambda: subprocess.Popen(["explorer", "/select,", str((self.folder / "render" / "video.mp4").resolve())]))
+        show.clicked.connect(lambda: subprocess.Popen(["explorer", "/select,", str(self._rendered_video().resolve())]))
         open_row.addWidget(show)
         self.open_btn.setVisible(False)
         layout.addWidget(self.open_btn)
@@ -613,6 +613,12 @@ class StudioWindow(QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setSizes([700, 110])
         return splitter
+
+    def _rendered_video(self) -> Path:
+        """Final video of the open project; renders made before the naming change were saved as render/video.mp4."""
+        video = render_output_path(self.folder)
+        legacy = self.folder / "render" / "video.mp4"
+        return legacy if not video.is_file() and legacy.is_file() else video
 
     def _say(self, text: str):
         if text:
@@ -694,7 +700,7 @@ class StudioWindow(QMainWindow):
         self.title.setText(self.project["name"])
         self.setWindowTitle(f"Video Factory — {self.project['name']}")
         self._say("")
-        self.open_btn.setVisible((folder / "render" / "video.mp4").is_file())
+        self.open_btn.setVisible(self._rendered_video().is_file())
         self.loading = False
         self._rebuild_scenes()
 

@@ -112,7 +112,7 @@ data/
 │   │   └── library.json               # {ruta_relativa: media_dict} de lo descargado de bancos
 │   ├── voice/<hash16>.wav|.mp3        # caché de voz sintetizada
 │   └── render/
-│       ├── video.mp4  render.json  creditos.txt  captions.ass
+│       ├── <carpeta-del-proyecto>-render.mp4  render.json  creditos.txt  captions.ass   # los renders antiguos se llaman video.mp4
 │       ├── .work-<id>/scenes/scene-NNNN.mp4|.wav|-frame.png # intermedios temporales de render; se borran al completar
 │       ├── frames/<stem>_<seg>.jpg    # fotogramas de videos para la vista previa de "Inicio"
 │       └── preview/scene.mp4 + captions.ass   # vista previa de UNA escena (540x960 o 960x540)
@@ -281,7 +281,7 @@ Funciones (todas síncronas, sin Qt; reutilizables desde scripts):
 
 ## 7. Pipeline de render (`project.render_project`)
 
-Entrada: carpeta del proyecto. Salida: `render/video.mp4` (o `render/preview/scene.mp4` con `only_scene`) + informe.
+Entrada: carpeta del proyecto. Salida: `render/<nombre-de-la-carpeta>-render.mp4` (p. ej. `megalodon-gigante-64ca-render.mp4`; la ruta sale de `project.render_output_path()`; la ventana también reconoce el `video.mp4` de renders antiguos) (o `render/preview/scene.mp4` con `only_scene`) + informe.
 
 1. `load_project`; en vista previa solo la escena indicada; valida que cada escena tenga `media` y que el archivo exista (`FileNotFoundError("La escena N no tiene un recurso visual válido.")`) y que exista `data/tts-packages` si hay diálogo.
 2. Estilos ASS: `Default` (abajo, alineación 2), `Middle` (5, MarginV 0), `Top` (8), con fuente/tamaño/colores del proyecto. Cabecera y dimensiones son 1080×1920 en `portrait` (predeterminado y migración para proyectos antiguos) o 1920×1080 en `landscape`; en horizontal el tamaño de subtítulo se escala a 72 % y los márgenes se adaptan.

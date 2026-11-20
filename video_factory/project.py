@@ -94,6 +94,11 @@ def new_scene(dialogue: str = "", orientation: str = "portrait") -> dict:
     return {"id": uuid.uuid4().hex[:8], "dialogue": dialogue, "chapter": "", "media": None, "crop": "fill_9_16", "motion": "zoom_in", "zoom": {"speed": "slow", "direction": "in"}, "start": 0.0, "duration": EMPTY_SCENE_SECONDS, "text_overlay": dict(TEXT_OVERLAY_DEFAULTS), "subtitle_pos": "bottom", "show_subtitles": orientation != "landscape", "mute_music": False, "music_fade": dict(FADE_DEFAULTS), "clip_volume": 0.0, "sfx": [], "sfx_fade": dict(FADE_DEFAULTS)}
 
 
+def render_output_path(folder: Path) -> Path:
+    """Final video of a project: render/<project folder name>-render.mp4."""
+    return folder / "render" / f"{folder.name}-render.mp4"
+
+
 def create_project(name: str, channel: str | None = None, root: Path | None = None) -> Path:
     channel = channel or last_channel()
     if channel not in CHANNELS:
@@ -494,7 +499,7 @@ def _fill_pan_graph(motion: str, amount: float, width: int, height: int, frames:
 
 
 def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=None, only_scene: int | None = None, only_scenes: list[int] | None = None, force_preview: bool = False) -> dict:
-    """Render the project into render/video.mp4, or a quick low-resolution scene preview."""
+    """Render the project into render/<folder name>-render.mp4, or a quick low-resolution scene preview."""
     project = load_project(folder)
     preview = only_scene is not None or only_scenes is not None
     indices = only_scenes if only_scenes is not None else [only_scene] if only_scene is not None else None
@@ -740,7 +745,7 @@ def render_project(folder: Path, ffmpeg_explicit: str | None = None, progress=No
         maps = ["-map", "[final_video]", "-map", "[final_audio]"]
     else:
         maps = ["-map", "[main_video]", "-map", "[main_audio]"]
-    output = preview_cache if preview else out_dir / "video.mp4"
+    output = preview_cache if preview else render_output_path(folder)
     partial = output.with_name(output.stem + ".part.mp4")
     cmd += ["-filter_complex", ";".join(graph), *maps, "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-r", "30", "-b:v", "2M" if preview else "8M", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(partial)]
     try:
